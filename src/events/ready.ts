@@ -9,7 +9,7 @@ export default {
   name: Events.ClientReady,
   once: true,
   async execute(client: Client) {
-    console.log(`[Event: Ready]: Bot is authorized as ${client.user?.tag}`);
+    console.log(`[KitKat Ready]: Bot is authorized as ${client.user?.tag}`);
 
     const rest = new REST({ version: '10' }).setToken(Config.token);
     
@@ -22,25 +22,12 @@ export default {
         return;
       }
 
-      console.log(`[REST]: Registering ${commandsJson.length} slash commands...`);
+      console.log(`[KitKat REST]: Registering ${commandsJson.length} global slash commands...`);
 
-      // Deploy commands to a single server for instant updates during development,
-      // or globally if no GUILD_ID is specified.
-      if (Config.guildId) {
-        await rest.put(
-          Routes.applicationGuildCommands(Config.clientId, Config.guildId),
-          { body: commandsJson }
-        );
-        console.log(`[REST]: Guild-level commands successfully registered for guild ${Config.guildId}.`);
-      } else {
-        await rest.put(
-          Routes.applicationCommands(Config.clientId),
-          { body: commandsJson }
-        );
-        console.log('[REST]: Global slash commands successfully registered.');
-      }
+      await rest.put(Routes.applicationCommands(Config.clientId), { body: commandsJson });
+      console.log('[KitKat REST]: Global slash commands successfully registered.');
     } catch (error) {
-      console.error('[REST Error]: Failed to register slash commands via Discord API:', error);
+      console.error('[KitKat REST Error]: Failed to register slash commands via Discord API:', error);
     }
   },
 };

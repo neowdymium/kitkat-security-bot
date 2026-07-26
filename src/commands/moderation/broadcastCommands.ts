@@ -8,6 +8,7 @@ import {
 } from 'discord.js';
 import { Database } from '../../database.js';
 import { sendAuditLog } from '../../middleware/messagePipeline.js';
+import { memberHasGuildScope, buildKitKatEmbed } from '../../lib/kitkatState.js';
 
 // ==========================================
 // 1. /tell command (Broadcast Message)
@@ -32,7 +33,7 @@ export const TellCommand = {
     const executor = interaction.member as GuildMember;
 
     // Check permission: Executor must have ManageMessages or bot "tell" scope
-    if (!executor.permissions.has(PermissionFlagsBits.ManageMessages) && !Database.hasPermission(executor.id, 'tell')) {
+    if (!executor.permissions.has(PermissionFlagsBits.ManageMessages) && !memberHasGuildScope(executor, 'tell')) {
       return interaction.reply({
         content: '❌ **Access Denied**: You require "Manage Messages" server permission or bot internal "tell" scope to use broadcast.',
         ephemeral: true,
@@ -70,16 +71,16 @@ export const TellCommand = {
       });
 
       // 3. Log the audit details to the staff logs channel (masks publicly, logs internally)
-      const auditEmbed = new EmbedBuilder()
-        .setColor(0x00ffaa)
-        .setTitle('📢 Public Broadcast Transmitted')
-        .setDescription(`Moderator **${interaction.user.tag}** sent a broadcast via bot.`)
+      const auditEmbed = buildKitKatEmbed(
+        '📢 KitKat Broadcast Transmitted',
+        `Moderator **${interaction.user.tag}** sent a broadcast via the bot.`,
+        0x00ffaa
+      )
         .addFields(
           { name: 'Moderator', value: `<@${interaction.user.id}>`, inline: true },
           { name: 'Channel', value: `<#${channel.id}>`, inline: true },
           { name: 'Content Sent', value: `\`\`\`\n${messageText.slice(0, 1000)}\n\`\`\`` }
-        )
-        .setTimestamp();
+        );
 
       await sendAuditLog(interaction.client, interaction.guild!.id, { embeds: [auditEmbed] });
 

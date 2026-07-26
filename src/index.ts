@@ -2,24 +2,13 @@ import { Client, GatewayIntentBits, Collection, ActivityType } from 'discord.js'
 import { Config } from './config.js';
 import { loadCommands } from './handlers/commandHandler.js';
 import { loadEvents } from './handlers/eventHandler.js';
+import type { KitKatGuildState } from './lib/kitkatState.js';
 
 // Extend the discord.js Client interface to hold commands and in-memory states
 declare module 'discord.js' {
   interface Client {
     commands: Collection<string, any>;
-    // Maps channelId -> userId of the moderator who locked the voice channel
-    lockedChannels: Map<string, string>;
-    // Maps channelId -> userId of the moderator who enabled the guard
-    guardedChannels: Map<string, string>;
-    // Maps targetUserId -> userId of the moderator who muted (timed out) the user
-    mutedUsers: Map<string, string>;
-    // Set of user IDs who have authenticated using the ARCH safeguard code
-    archUsers: Set<string>;
-    
-    // Voice Session Whitelist: channelId -> Set of whitelisted userIds
-    channelWhitelists: Map<string, Set<string>>;
-    // Voice Temp-Kicks: userId -> expiration timestamp (milliseconds)
-    voiceTempKicks: Map<string, number>;
+    kitkatGuildStates: Map<string, KitKatGuildState>;
   }
 }
 
@@ -46,21 +35,14 @@ async function bootstrap() {
     ],
   });
 
-  // Initialize in-memory state tracking to enforce locking/guard ownership
-  client.lockedChannels = new Map();
-  client.guardedChannels = new Map();
-  client.mutedUsers = new Map();
-  client.archUsers = new Set();
-  
-  // Initialize new extended state tracking
-  client.channelWhitelists = new Map();
-  client.voiceTempKicks = new Map();
+  // Initialize the per-guild KitKat state cache used by moderation, voice, and permissions
+  client.kitkatGuildStates = new Map();
 
   // Setup presence details
   client.once('ready', () => {
     if (client.user) {
       client.user.setPresence({
-        activities: [{ name: 'Server Security (v2)', type: ActivityType.Watching }],
+        activities: [{ name: 'KitKat Security', type: ActivityType.Watching }],
         status: 'online',
       });
       console.log(`[System Ready]: Logged in successfully as ${client.user.tag}`);

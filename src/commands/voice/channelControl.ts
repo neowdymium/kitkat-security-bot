@@ -1,326 +1,420 @@
-import { 
-  SlashCommandBuilder, 
-  ChatInputCommandInteraction, 
-  PermissionFlagsBits, 
-  VoiceChannel, 
+import {
+  SlashCommandBuilder,
+  ChatInputCommandInteraction,
+  PermissionFlagsBits,
   GuildMember,
-  EmbedBuilder
+  VoiceChannel,
+  ChannelType,
+  Role,
+  EmbedBuilder,
 } from 'discord.js';
-import { Config } from '../../config.js';
-import { Database } from '../../database.js';
-import { sendAuditLog } from '../../middleware/messagePipeline.js';
+import {
+  allowTargetOnLockedChannels,
+  buildKitKatEmbed,
+  cancelTempVcCleanup,
+  canUseKitKatRestrictedCommand,
+  deleteTempVcRecord,
+  getGuildState,
+  getNextTempVcIndex,
+  getPermissionGrantsForScope,
+  getTempVcCategory,
+  getTempVcRecord,
+  memberHasAnyScope,
+  memberCanBypassVclock,
+  registerTempVc,
+  scheduleTempVcCleanup,
+  setTempVcCategory,
+  isGuildArch,
+} from '../../lib/kitkatState.js';
+import { sendKitKatLog } from '../../lib/kitkatState.js';
 
-// Helper to verify if the bot has permission to modify channel settings
-function verifyBotChannelPermissions(
-  interaction: ChatInputCommandInteraction, 
-  channel: VoiceChannel
-): boolean {
+function botCanManageChannel(interaction: ChatInputCommandInteraction, channel: VoiceChannel): boolean {
   const bot = interaction.guild?.members.me;
   if (!bot) return false;
-
-  // Resolves the bot's permissions inside the specific voice channel.
-  // Requires PermissionFlagsBits.ManageRoles or ManageChannels.
-  const permissions = bot.permissionsIn(channel);
-  return permissions.has(PermissionFlagsBits.ManageRoles) || permissions.has(PermissionFlagsBits.ManageChannels);
+  return bot.permissionsIn(channel).has(PermissionFlagsBits.ManageChannels);
 }
 
-// ==========================================
-// 1. /vclock command (Voice Channel Lock)
-// ==========================================
+function getMemberChannel(member: GuildMember): VoiceChannel | null {
+  return (member.voice.channel as VoiceChannel | null) ?? null;
+}
+
+function isVoiceBasedChannel(channel: ReturnType<ChatInputCommandInteraction['options']['getChannel']>): boolean {
+  if (!channel) return false;
+  return 'isVoiceBased' in channel && typeof channel.isVoiceBased === 'function' && channel.isVoiceBased();
+}
+
+function getAllowedLockTargets(interaction: ChatInputCommandInteraction): string[] {
+  const guildId = interaction.guildId!;
+  const state = getGuildState(interaction.client, guildId);
+  const targets = new Set<string>();
+
+  for (const archId of state.archUsers.keys()) {
+    targets.add(archId);
+  }
+
+  for (const roleId of state.vclockBypassRoles) {
+    targets.add(roleId);
+  }
+
+  for (const grant of getPermissionGrantsForScope(interaction.client, guildId, 'vclock')) {
+    targets.add(grant.targetId);
+  }
+
+  return Array.from(targets);
+}
+
+async function clearLockOverwrites(interaction: ChatInputCommandInteraction, channel: VoiceChannel): Promise<void> {
+  const guildId = interaction.guildId!;
+  const state = getGuildState(interaction.client, guildId);
+
+  const overwriteTargets = new Set<string>();
+  overwriteTargets.add(interaction.user.id);
+
+  for (const archId of state.archUsers.keys()) {
+    overwriteTargets.add(archId);
+  }
+
+  for (const roleId of state.vclockBypassRoles) {
+    overwriteTargets.add(roleId);
+  }
+
+  for (const grant of getPermissionGrantsForScope(interaction.client, guildId, 'vclock')) {
+    overwriteTargets.add(grant.targetId);
+  }
+
+  const whitelist = state.whitelists.get(channel.id);
+  if (whitelist) {
+    for (const userId of whitelist) {
+      overwriteTargets.add(userId);
+    }
+  }
+
+  for (const targetId of overwriteTargets) {
+    await channel.permissionOverwrites.delete(targetId).catch(() => {});
+  }
+}
+
+async function createTempVc(
+  interaction: ChatInputCommandInteraction,
+  owner: GuildMember,
+  categoryId: string
+): Promise<void> {
+  const index = getNextTempVcIndex(interaction.client, interaction.guildId!, owner.id);
+  if (!index) {
+    await interaction.reply({
+      content: '❌ You already have the maximum of 9 temporary voice channels.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const channelName = `${owner.user.username}'s Temporary VC ${index}`;
+  const channel = await interaction.guild!.channels.create({
+    name: channelName,
+    type: ChannelType.GuildVoice,
+    parent: categoryId,
+    reason: `KitKat temporary voice channel created by ${owner.user.tag}`,
+  });
+
+  registerTempVc(interaction.client, interaction.guildId!, channel.id, owner.id, categoryId, index);
+  scheduleTempVcCleanup(interaction.client, interaction.guildId!, channel as VoiceChannel);
+
+  await channel.permissionOverwrites.create(owner.id, {
+    Connect: true,
+    Speak: true,
+  });
+
+  await interaction.reply({
+    content: `✅ **KitKat TempVC**: Created <#${channel.id}> for **${owner.user.tag}**.`,
+  });
+}
+
+async function deleteTempVcIfOwned(interaction: ChatInputCommandInteraction, actor: GuildMember): Promise<void> {
+  const state = getGuildState(interaction.client, interaction.guildId!);
+  const currentChannel = getMemberChannel(actor);
+  let recordChannelId: string | null = null;
+  let targetChannel: VoiceChannel | null = null;
+
+  if (currentChannel) {
+    const record = getTempVcRecord(interaction.client, interaction.guildId!, currentChannel.id);
+    if (record && (record.ownerId === actor.id || memberHasAnyScope(actor, ['tempvc']))) {
+      recordChannelId = currentChannel.id;
+      targetChannel = currentChannel;
+    }
+  }
+
+  if (!recordChannelId) {
+    for (const [channelId, record] of state.tempVcs.entries()) {
+      if (record.ownerId === actor.id) {
+        const channel = interaction.guild!.channels.cache.get(channelId);
+        if (channel && channel.type === ChannelType.GuildVoice) {
+          recordChannelId = channelId;
+          targetChannel = channel as VoiceChannel;
+        }
+      }
+    }
+  }
+
+  if (!recordChannelId || !targetChannel) {
+    await interaction.reply({
+      content: '❌ No temporary voice channel owned by you could be found.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  cancelTempVcCleanup(interaction.client, interaction.guildId!, recordChannelId);
+  deleteTempVcRecord(interaction.client, interaction.guildId!, recordChannelId);
+  await targetChannel.delete(`KitKat tempvc removed by ${interaction.user.tag}`).catch(() => {});
+
+  await interaction.reply({
+    content: `🗑️ **KitKat TempVC**: Deleted <#${recordChannelId}>.`,
+  });
+}
+
 export const VcLockCommand = {
   data: new SlashCommandBuilder()
     .setName('vclock')
     .setDescription('Locks your current voice channel for new members.'),
   async execute(interaction: ChatInputCommandInteraction) {
     const member = interaction.member as GuildMember;
-    const voiceChannel = member.voice.channel as VoiceChannel | null;
+    const voiceChannel = getMemberChannel(member);
 
     if (!voiceChannel) {
       return interaction.reply({
-        content: '❌ **Voice Error**: You must join a voice channel before running this command.',
+        content: '❌ You need to join a voice channel before using `/vclock`.',
         ephemeral: true,
       });
     }
 
-    if (!verifyBotChannelPermissions(interaction, voiceChannel)) {
+    if (!canUseKitKatRestrictedCommand(member, 'vclock')) {
       return interaction.reply({
-        content: '❌ **Bot Permission Error**: I do not have permission to manage permissions in your current voice channel.',
+        content: '❌ You need a KitKat `vclock` scope or the matching Discord permission to use this command.',
         ephemeral: true,
       });
     }
 
-    const channelId = voiceChannel.id;
-    const client = interaction.client;
-
-    if (client.lockedChannels.has(channelId)) {
-      const lockerId = client.lockedChannels.get(channelId);
+    if (!botCanManageChannel(interaction, voiceChannel)) {
       return interaction.reply({
-        content: `❌ **State Error**: This channel is already locked by <@${lockerId}>.`,
+        content: '❌ KitKat needs Manage Channels permission in your voice channel.',
+        ephemeral: true,
+      });
+    }
+
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    if (state.lockedChannels.has(voiceChannel.id)) {
+      return interaction.reply({
+        content: `❌ This voice channel is already locked by <@${state.lockedChannels.get(voiceChannel.id)}>.`,
         ephemeral: true,
       });
     }
 
     try {
-      // 1. Modify channel permissions to deny '@everyone' the permission to Connect
-      await voiceChannel.permissionOverwrites.edit(interaction.guild!.roles.everyone, {
-        Connect: false,
-      });
+      await voiceChannel.permissionOverwrites.edit(interaction.guild!.roles.everyone, { Connect: false });
 
-      // 2. Allow any currently registered ARCH bypass users to connect
-      for (const archUserId of client.archUsers) {
-        await voiceChannel.permissionOverwrites.create(archUserId, {
-          Connect: true,
-        }).catch(() => {});
+      state.lockedChannels.set(voiceChannel.id, interaction.user.id);
+
+      await voiceChannel.permissionOverwrites.edit(interaction.user.id, { Connect: true }).catch(() => {});
+
+      for (const targetId of getAllowedLockTargets(interaction)) {
+        await voiceChannel.permissionOverwrites.edit(targetId, { Connect: true }).catch(() => {});
       }
 
-      // 3. Allow whitelisted members for the active session (if any exist)
-      const whitelist = client.channelWhitelists.get(channelId);
-      if (whitelist) {
-        for (const whitelistedId of whitelist) {
-          await voiceChannel.permissionOverwrites.create(whitelistedId, {
-            Connect: true,
-          }).catch(() => {});
-        }
-      }
+      const embed = buildKitKatEmbed(
+        '🔒 KitKat Voice Lock Enabled',
+        `Locked **${voiceChannel.name}** for new members.`,
+        0x0055ff
+      ).addFields(
+        { name: 'Channel ID', value: voiceChannel.id, inline: true },
+        { name: 'Owner', value: `<@${interaction.user.id}>`, inline: true }
+      );
 
-      // 4. Save the locker user ID in memory
-      client.lockedChannels.set(channelId, interaction.user.id);
-
-      const auditEmbed = new EmbedBuilder()
-        .setColor(0x0055ff)
-        .setTitle('🔒 Voice Channel Locked')
-        .setDescription(`Channel **${voiceChannel.name}** was locked.`)
-        .addFields(
-          { name: 'Channel ID', value: channelId, inline: true },
-          { name: 'Lock Owner', value: `<@${interaction.user.id}>`, inline: true }
-        )
-        .setTimestamp();
-
-      await sendAuditLog(client, interaction.guild!.id, { embeds: [auditEmbed] });
+      await sendKitKatLog(interaction.client, interaction.guildId!, { embeds: [embed] });
 
       await interaction.reply({
-        content: `🔒 **Voice Lock**: Channel **${voiceChannel.name}** has been locked.\n*Only the initiator (<@${interaction.user.id}>), whitelisted users, and ARCH members can join.*`,
+        content: `🔒 **KitKat Voice Lock**: **${voiceChannel.name}** is now locked.`,
       });
     } catch (error) {
-      console.error('[VC Lock Error]:', error);
+      console.error('[KitKat Voice Lock Error]:', error);
       await interaction.reply({ content: '❌ Failed to lock the voice channel.', ephemeral: true });
     }
-  }
+  },
 };
 
-// ==========================================
-// 2. /vcunlock command (Voice Channel Unlock)
-// ==========================================
 export const VcUnlockCommand = {
   data: new SlashCommandBuilder()
     .setName('vcunlock')
     .setDescription('Unlocks your current voice channel.'),
   async execute(interaction: ChatInputCommandInteraction) {
     const member = interaction.member as GuildMember;
-    const voiceChannel = member.voice.channel as VoiceChannel | null;
+    const voiceChannel = getMemberChannel(member);
 
     if (!voiceChannel) {
       return interaction.reply({
-        content: '❌ **Voice Error**: You must join a voice channel before running this command.',
+        content: '❌ You need to join a voice channel before using `/vcunlock`.',
         ephemeral: true,
       });
     }
 
-    if (!verifyBotChannelPermissions(interaction, voiceChannel)) {
+    if (!botCanManageChannel(interaction, voiceChannel)) {
       return interaction.reply({
-        content: '❌ **Bot Permission Error**: I do not have permission to manage permissions in this channel.',
+        content: '❌ KitKat needs Manage Channels permission in this voice channel.',
         ephemeral: true,
       });
     }
 
-    const channelId = voiceChannel.id;
-    const client = interaction.client;
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    const lockerId = state.lockedChannels.get(voiceChannel.id);
 
-    if (!client.lockedChannels.has(channelId)) {
+    if (!lockerId) {
       return interaction.reply({
-        content: '❌ **State Error**: This voice channel is not currently locked.',
+        content: '❌ This voice channel is not locked.',
         ephemeral: true,
       });
     }
 
-    // Ownership Check
-    const lockerId = client.lockedChannels.get(channelId);
-    const isArch = client.archUsers.has(interaction.user.id);
-
-    if (lockerId && lockerId !== interaction.user.id && !isArch) {
+    if (lockerId !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
       return interaction.reply({
-        content: `❌ **Access Denied**: You cannot unlock this channel. It was locked by <@${lockerId}>.`,
+        content: `❌ Only the channel owner (<@${lockerId}>) or an ARCH member can unlock this channel.`,
         ephemeral: true,
       });
     }
 
     try {
-      // 1. Reset Connect permission for @everyone
-      await voiceChannel.permissionOverwrites.edit(interaction.guild!.roles.everyone, {
-        Connect: null,
-      });
+      await voiceChannel.permissionOverwrites.edit(interaction.guild!.roles.everyone, { Connect: null });
+      await clearLockOverwrites(interaction, voiceChannel);
+      state.lockedChannels.delete(voiceChannel.id);
+      state.whitelists.delete(voiceChannel.id);
 
-      // 2. Remove explicit allows for ARCH members to clean up overwrites
-      for (const archUserId of client.archUsers) {
-        const overwrite = voiceChannel.permissionOverwrites.cache.get(archUserId);
-        if (overwrite) {
-          await overwrite.delete().catch(() => {});
-        }
-      }
+      const embed = buildKitKatEmbed(
+        '🔓 KitKat Voice Lock Removed',
+        `Unlocked **${voiceChannel.name}** and cleared temporary connect overrides.`,
+        0x00ff00
+      ).addFields(
+        { name: 'Channel ID', value: voiceChannel.id, inline: true },
+        { name: 'Unlocked By', value: `<@${interaction.user.id}>`, inline: true }
+      );
 
-      // 3. Remove explicit allows for session-whitelisted members
-      const whitelist = client.channelWhitelists.get(channelId);
-      if (whitelist) {
-        for (const whitelistedId of whitelist) {
-          const overwrite = voiceChannel.permissionOverwrites.cache.get(whitelistedId);
-          if (overwrite) {
-            await overwrite.delete().catch(() => {});
-          }
-        }
-      }
-
-      // 4. Clear states
-      client.lockedChannels.delete(channelId);
-      client.channelWhitelists.delete(channelId);
-
-      const auditEmbed = new EmbedBuilder()
-        .setColor(0x00ff00)
-        .setTitle('🔓 Voice Channel Unlocked')
-        .setDescription(`Channel **${voiceChannel.name}** was unlocked and whitelists cleared.`)
-        .addFields(
-          { name: 'Channel ID', value: channelId, inline: true },
-          { name: 'Unlocker', value: `<@${interaction.user.id}>`, inline: true }
-        )
-        .setTimestamp();
-
-      await sendAuditLog(client, interaction.guild!.id, { embeds: [auditEmbed] });
+      await sendKitKatLog(interaction.client, interaction.guildId!, { embeds: [embed] });
 
       await interaction.reply({
-        content: `🔓 **Voice Unlock**: Channel **${voiceChannel.name}** has been unlocked.`,
+        content: `🔓 **KitKat Voice Unlock**: **${voiceChannel.name}** is now unlocked.`,
       });
     } catch (error) {
-      console.error('[VC Unlock Error]:', error);
+      console.error('[KitKat Voice Unlock Error]:', error);
       await interaction.reply({ content: '❌ Failed to unlock the voice channel.', ephemeral: true });
     }
-  }
+  },
 };
 
-// ==========================================
-// 3. /guard command (VC Guard Enable)
-// ==========================================
 export const GuardCommand = {
   data: new SlashCommandBuilder()
     .setName('guard')
-    .setDescription('Enables the VC Guard blacklist defense on your current voice channel.'),
+    .setDescription('Enables privacy lockdown on your current temporary voice channel.'),
   async execute(interaction: ChatInputCommandInteraction) {
     const member = interaction.member as GuildMember;
-    const voiceChannel = member.voice.channel as VoiceChannel | null;
+    const voiceChannel = getMemberChannel(member);
 
     if (!voiceChannel) {
       return interaction.reply({
-        content: '❌ **Voice Error**: You must join a voice channel to enable the Guard.',
+        content: '❌ You need to join a voice channel before using `/guard`.',
         ephemeral: true,
       });
     }
 
-    const channelId = voiceChannel.id;
-    const client = interaction.client;
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    const tempVc = state.tempVcs.get(voiceChannel.id);
 
-    if (client.guardedChannels.has(channelId)) {
-      const guarderId = client.guardedChannels.get(channelId);
+    if (!tempVc) {
       return interaction.reply({
-        content: `❌ **State Error**: The Guard is already active on this channel (enabled by <@${guarderId}>).`,
+        content: '❌ `/guard` only works inside KitKat temporary voice channels.',
         ephemeral: true,
       });
     }
 
-    client.guardedChannels.set(channelId, interaction.user.id);
+    if (tempVc.ownerId !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+      return interaction.reply({
+        content: `❌ Only the temp VC owner (<@${tempVc.ownerId}>) or an ARCH member can enable guard mode.`,
+        ephemeral: true,
+      });
+    }
 
-    const auditEmbed = new EmbedBuilder()
-      .setColor(0xffaa00)
-      .setTitle('🛡️ Voice Guard Active')
-      .setDescription(`Activated Guard on **${voiceChannel.name}**.`)
-      .addFields(
-        { name: 'Channel ID', value: channelId, inline: true },
-        { name: 'Guard Owner', value: `<@${interaction.user.id}>`, inline: true }
-      )
-      .setTimestamp();
+    state.guardedChannels.set(voiceChannel.id, interaction.user.id);
+    tempVc.guardEnabled = true;
 
-      await sendAuditLog(client, interaction.guild!.id, { embeds: [auditEmbed] });
+    const embed = buildKitKatEmbed(
+      '🛡️ KitKat Guard Enabled',
+      `Privacy lockdown is active in **${voiceChannel.name}**.`,
+      0xffaa00
+    ).addFields(
+      { name: 'Channel ID', value: voiceChannel.id, inline: true },
+      { name: 'Owner', value: `<@${interaction.user.id}>`, inline: true }
+    );
+
+    await sendKitKatLog(interaction.client, interaction.guildId!, { embeds: [embed] });
 
     await interaction.reply({
-      content: `🛡️ **VC Guard Activated**: Guard is now active on **${voiceChannel.name}**.\n*Only the initiator (<@${interaction.user.id}>), whitelisted users, and ARCH members can join.*`,
+      content: `🛡️ **KitKat Guard** is now active in **${voiceChannel.name}**.`,
     });
-  }
+  },
 };
 
-// ==========================================
-// 4. /unguard command (VC Guard Disable)
-// ==========================================
 export const UnguardCommand = {
   data: new SlashCommandBuilder()
     .setName('unguard')
-    .setDescription('Disables the VC Guard blacklist defense on your current voice channel.'),
+    .setDescription('Disables privacy lockdown on your current temporary voice channel.'),
   async execute(interaction: ChatInputCommandInteraction) {
     const member = interaction.member as GuildMember;
-    const voiceChannel = member.voice.channel as VoiceChannel | null;
+    const voiceChannel = getMemberChannel(member);
 
     if (!voiceChannel) {
       return interaction.reply({
-        content: '❌ **Voice Error**: You must join a voice channel to disable the Guard.',
+        content: '❌ You need to join a voice channel before using `/unguard`.',
         ephemeral: true,
       });
     }
 
-    const channelId = voiceChannel.id;
-    const client = interaction.client;
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    const tempVc = state.tempVcs.get(voiceChannel.id);
 
-    if (!client.guardedChannels.has(channelId)) {
+    if (!tempVc) {
       return interaction.reply({
-        content: '❌ **State Error**: The Guard is not active on your current voice channel.',
+        content: '❌ `/unguard` only works inside KitKat temporary voice channels.',
         ephemeral: true,
       });
     }
 
-    // Ownership Check
-    const guarderId = client.guardedChannels.get(channelId);
-    const isArch = client.archUsers.has(interaction.user.id);
-
-    if (guarderId && guarderId !== interaction.user.id && !isArch) {
+    if (tempVc.ownerId !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
       return interaction.reply({
-        content: `❌ **Access Denied**: You cannot disable this guard. It was activated by <@${guarderId}>.`,
+        content: `❌ Only the temp VC owner (<@${tempVc.ownerId}>) or an ARCH member can disable guard mode.`,
         ephemeral: true,
       });
     }
 
-    client.guardedChannels.delete(channelId);
-    client.channelWhitelists.delete(channelId); // Reset Whitelist on session close
+    state.guardedChannels.delete(voiceChannel.id);
+    tempVc.guardEnabled = false;
 
-    const auditEmbed = new EmbedBuilder()
-      .setColor(0x00ff00)
-      .setTitle('🛡️ Voice Guard Deactivated')
-      .setDescription(`Deactivated Guard and cleared whitelists on **${voiceChannel.name}**.`)
-      .addFields(
-        { name: 'Channel ID', value: channelId, inline: true },
-        { name: 'Deactivator', value: `<@${interaction.user.id}>`, inline: true }
-      )
-      .setTimestamp();
+    const embed = buildKitKatEmbed(
+      '🛡️ KitKat Guard Disabled',
+      `Guard mode was removed from **${voiceChannel.name}**.`,
+      0x00ff00
+    ).addFields(
+      { name: 'Channel ID', value: voiceChannel.id, inline: true },
+      { name: 'Owner', value: `<@${interaction.user.id}>`, inline: true }
+    );
 
-    await sendAuditLog(client, interaction.guild!.id, { embeds: [auditEmbed] });
+    await sendKitKatLog(interaction.client, interaction.guildId!, { embeds: [embed] });
 
     await interaction.reply({
-      content: `🛡️ **VC Guard Deactivated**: Blacklist protection disabled on **${voiceChannel.name}**.`,
+      content: `🛡️ **KitKat Guard** has been disabled in **${voiceChannel.name}**.`,
     });
-  }
+  },
 };
 
-// ==========================================
-// 5. /whitelist command (Manage Session whitelist)
-// ==========================================
 export const WhitelistCommand = {
   data: new SlashCommandBuilder()
     .setName('whitelist')
-    .setDescription('Manage whitelisted users for the active voice lock/guard session.')
+    .setDescription('Manage whitelisted users for the active voice lock or guard session.')
     .addSubcommand((sub) =>
       sub
         .setName('add')
@@ -335,102 +429,180 @@ export const WhitelistCommand = {
     ),
   async execute(interaction: ChatInputCommandInteraction) {
     const member = interaction.member as GuildMember;
-    const voiceChannel = member.voice.channel as VoiceChannel | null;
+    const voiceChannel = getMemberChannel(member);
+    const sub = interaction.options.getSubcommand();
 
     if (!voiceChannel) {
       return interaction.reply({
-        content: '❌ **Voice Error**: You must join a voice channel to manage its whitelist.',
+        content: '❌ You need to join a voice channel before managing a whitelist.',
         ephemeral: true,
       });
     }
 
-    const channelId = voiceChannel.id;
-    const client = interaction.client;
-
-    const isLocked = client.lockedChannels.has(channelId);
-    const isGuarded = client.guardedChannels.has(channelId);
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    const isLocked = state.lockedChannels.has(voiceChannel.id);
+    const isGuarded = state.guardedChannels.has(voiceChannel.id);
 
     if (!isLocked && !isGuarded) {
       return interaction.reply({
-        content: '❌ **State Error**: Active whitelists are only supported on locked or guarded voice channels.',
+        content: '❌ Whitelists only work on locked or guarded voice channels.',
         ephemeral: true,
       });
     }
 
-    // Ownership Check
-    const lockerId = client.lockedChannels.get(channelId);
-    const guarderId = client.guardedChannels.get(channelId);
-    const ownerId = lockerId || guarderId;
-    const isArch = client.archUsers.has(interaction.user.id);
+    const isOwner =
+      state.lockedChannels.get(voiceChannel.id) === interaction.user.id ||
+      state.guardedChannels.get(voiceChannel.id) === interaction.user.id ||
+      isGuildArch(interaction.client, interaction.guildId!, interaction.user.id);
 
-    if (ownerId && ownerId !== interaction.user.id && !isArch) {
+    if (!isOwner && !memberHasAnyScope(member, ['whitelist'])) {
       return interaction.reply({
-        content: `❌ **Access Denied**: Only the moderator who locked/guarded this channel (<@${ownerId}>) can edit its whitelist.`,
+        content: '❌ Only the channel owner, ARCH members, or users with a KitKat `whitelist` scope can edit this list.',
         ephemeral: true,
       });
     }
 
     const targetUser = interaction.options.getUser('user', true);
-    const sub = interaction.options.getSubcommand();
-
-    let whitelist = client.channelWhitelists.get(channelId);
+    let whitelist = state.whitelists.get(voiceChannel.id);
     if (!whitelist) {
-      whitelist = new Set();
-      client.channelWhitelists.set(channelId, whitelist);
+      whitelist = new Set<string>();
+      state.whitelists.set(voiceChannel.id, whitelist);
     }
 
     if (sub === 'add') {
-      if (whitelist.has(targetUser.id)) {
-        return interaction.reply({
-          content: `ℹ️ **Status Check**: **${targetUser.tag}** is already whitelisted for this voice channel.`,
-          ephemeral: true,
-        });
-      }
-
       whitelist.add(targetUser.id);
-
-      // If channel is locked, modify permission overwrite to allow Connect
-      if (isLocked) {
-        if (verifyBotChannelPermissions(interaction, voiceChannel)) {
-          await voiceChannel.permissionOverwrites.create(targetUser.id, {
-            Connect: true,
-          }).catch(() => {});
-        }
+      if (isLocked && botCanManageChannel(interaction, voiceChannel)) {
+        await voiceChannel.permissionOverwrites.edit(targetUser.id, { Connect: true }).catch(() => {});
       }
 
       await interaction.reply({
-        content: `✅ **Voice Whitelist**: Added **${targetUser.tag}** to the whitelist for **${voiceChannel.name}**.`,
+        content: `✅ **KitKat Whitelist**: Added **${targetUser.tag}** to **${voiceChannel.name}**.`,
       });
-    } else if (sub === 'remove') {
-      if (!whitelist.has(targetUser.id)) {
-        return interaction.reply({
-          content: `❌ **Whitelist Error**: **${targetUser.tag}** is not whitelisted for this channel.`,
-          ephemeral: true,
-        });
-      }
-
-      whitelist.delete(targetUser.id);
-
-      // If channel is locked, delete their permission overwrite
-      if (isLocked) {
-        if (verifyBotChannelPermissions(interaction, voiceChannel)) {
-          const overwrite = voiceChannel.permissionOverwrites.cache.get(targetUser.id);
-          if (overwrite) {
-            await overwrite.delete().catch(() => {});
-          }
-        }
-      }
-
-      await interaction.reply({
-        content: `✅ **Voice Whitelist**: Removed **${targetUser.tag}** from the whitelist for **${voiceChannel.name}**.`,
-      });
+      return;
     }
-  }
+
+    whitelist.delete(targetUser.id);
+    if (isLocked && botCanManageChannel(interaction, voiceChannel)) {
+      await voiceChannel.permissionOverwrites.delete(targetUser.id).catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `✅ **KitKat Whitelist**: Removed **${targetUser.tag}** from **${voiceChannel.name}**.`,
+    });
+  },
 };
 
-// ==========================================
-// 6. /transfer command (Move Member)
-// ==========================================
+export const BypassCommand = {
+  data: new SlashCommandBuilder()
+    .setName('bypass')
+    .setDescription('Configure bypass access for voice channel locks.')
+    .addSubcommand((sub) =>
+      sub
+        .setName('vclock')
+        .setDescription('Allow a role to bypass `/vclock` locks.')
+        .addRoleOption((opt) => opt.setName('target').setDescription('Role to bypass voice locks').setRequired(true))
+    ),
+  async execute(interaction: ChatInputCommandInteraction) {
+    const member = interaction.member as GuildMember;
+    const bot = interaction.guild?.members.me;
+    const role = interaction.options.getRole('target', true) as Role;
+
+    if (!member.permissions.has(PermissionFlagsBits.ManageRoles) && !memberHasAnyScope(member, ['bypass'])) {
+      return interaction.reply({
+        content: '❌ You need Manage Roles or a KitKat `bypass` scope to manage bypass roles.',
+        ephemeral: true,
+      });
+    }
+
+    if (!bot || !bot.permissions.has(PermissionFlagsBits.ManageRoles)) {
+      return interaction.reply({
+        content: '❌ KitKat needs Manage Roles permission to manage bypass roles.',
+        ephemeral: true,
+      });
+    }
+
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    state.vclockBypassRoles.add(role.id);
+
+    for (const channelId of state.lockedChannels.keys()) {
+      const channel = interaction.guild!.channels.cache.get(channelId);
+      if (channel && channel.type === ChannelType.GuildVoice) {
+        await (channel as VoiceChannel).permissionOverwrites.edit(role.id, { Connect: true }).catch(() => {});
+      }
+    }
+
+    await interaction.reply({
+      content: `✅ **KitKat Bypass**: **${role.name}** can now bypass \`/vclock\` locks.`,
+    });
+  },
+};
+
+export const TempVcCommand = {
+  data: new SlashCommandBuilder()
+    .setName('tempvc')
+    .setDescription('Configure and manage temporary voice channels.')
+    .addSubcommand((sub) =>
+      sub
+        .setName('config')
+        .setDescription('Set the default category for temporary voice channels.')
+        .addChannelOption((opt) =>
+          opt
+            .setName('category')
+            .setDescription('Category where temp channels should spawn')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName('create').setDescription('Create a temporary voice channel.')
+    )
+    .addSubcommand((sub) =>
+      sub.setName('remove').setDescription('Delete your temporary voice channel.')
+    ),
+  async execute(interaction: ChatInputCommandInteraction) {
+    const sub = interaction.options.getSubcommand();
+    const member = interaction.member as GuildMember;
+    const state = getGuildState(interaction.client, interaction.guildId!);
+
+    if (sub === 'config') {
+      const category = interaction.options.getChannel('category', true);
+      if (category.type !== ChannelType.GuildCategory) {
+        return interaction.reply({
+          content: '❌ Please choose a Discord category channel.',
+          ephemeral: true,
+        });
+      }
+
+      if (!canUseKitKatRestrictedCommand(member, 'tempvc')) {
+        return interaction.reply({
+          content: '❌ You need a KitKat `tempvc` scope or the matching Discord permission to configure temp VCs.',
+          ephemeral: true,
+        });
+      }
+
+      setTempVcCategory(interaction.client, interaction.guildId!, category.id);
+      await interaction.reply({
+        content: `✅ **KitKat TempVC**: Default category set to <#${category.id}>.`,
+      });
+      return;
+    }
+
+    if (sub === 'create') {
+      const categoryId = getTempVcCategory(interaction.client, interaction.guildId!);
+      if (!categoryId) {
+        return interaction.reply({
+          content: '❌ No temp VC category is configured. Use `/tempvc config` first.',
+          ephemeral: true,
+        });
+      }
+
+      await createTempVc(interaction, member, categoryId);
+      return;
+    }
+
+    await deleteTempVcIfOwned(interaction, member);
+  },
+};
+
 export const TransferCommand = {
   data: new SlashCommandBuilder()
     .setName('transfer')
@@ -440,103 +612,39 @@ export const TransferCommand = {
   async execute(interaction: ChatInputCommandInteraction) {
     const executor = interaction.member as GuildMember;
     const bot = interaction.guild?.members.me;
+    const targetMember = interaction.options.getMember('target') as GuildMember | null;
+    const targetChannel = interaction.options.getChannel('channel', true);
 
-    // Check permission: MoveMembers or bot internal voice scope
-    if (!executor.permissions.has(PermissionFlagsBits.MoveMembers) && !Database.hasPermission(executor.id, 'transfer')) {
+    if (!executor.permissions.has(PermissionFlagsBits.MoveMembers) && !memberHasAnyScope(executor, ['transfer'])) {
       return interaction.reply({
-        content: '❌ **Access Denied**: You require "Move Members" server permission or bot internal voice scope to transfer users.',
+        content: '❌ You need Move Members or a KitKat `transfer` scope to use this command.',
         ephemeral: true,
       });
     }
 
     if (!bot || !bot.permissions.has(PermissionFlagsBits.MoveMembers)) {
       return interaction.reply({
-        content: '❌ **Bot Permission Error**: I do not have permission to move members. (requires Move Members).',
+        content: '❌ KitKat needs Move Members permission to transfer members.',
         ephemeral: true,
       });
     }
-
-    const targetMember = interaction.options.getMember('target') as GuildMember | null;
-    const targetChannel = interaction.options.getChannel('channel', true) as VoiceChannel;
 
     if (!targetMember) {
       return interaction.reply({ content: '❌ Target member not found.', ephemeral: true });
     }
 
-    if (!targetChannel.isVoiceBased()) {
-      return interaction.reply({ content: '❌ **Target Error**: Destination must be a voice channel.', ephemeral: true });
-    }
-
-    if (!targetMember.voice.channel) {
-      return interaction.reply({
-        content: `❌ **Voice Error**: Target **${targetMember.user.tag}** is not connected to a voice channel.`,
-        ephemeral: true,
-      });
+    if (!isVoiceBasedChannel(targetChannel)) {
+      return interaction.reply({ content: '❌ The destination must be a voice channel.', ephemeral: true });
     }
 
     try {
-      await targetMember.voice.setChannel(targetChannel);
+      await targetMember.voice.setChannel(targetChannel as VoiceChannel);
       await interaction.reply({
-        content: `✅ **Voice Transfer**: Moved **${targetMember.user.tag}** to **${targetChannel.name}**.`,
-      });
-    } catch (err) {
-      console.error('[Voice Transfer Error]:', err);
-      await interaction.reply({ content: '❌ Failed to transfer user to the target voice channel.', ephemeral: true });
-    }
-  }
-};
-
-// ==========================================
-// 7. /arch command (Register ARCH bypass role)
-// ==========================================
-export const ArchCommand = {
-  data: new SlashCommandBuilder()
-    .setName('arch')
-    .setDescription('Authenticates a user into the ARCH bypass list using the developer safeguard code.')
-    .addStringOption((option) =>
-      option.setName('code').setDescription('Safeguard authentication code').setRequired(true)
-    ),
-  async execute(interaction: ChatInputCommandInteraction) {
-    const codeInput = interaction.options.getString('code', true);
-    const client = interaction.client;
-    const userId = interaction.user.id;
-
-    if (client.archUsers.has(userId)) {
-      return interaction.reply({
-        content: 'ℹ️ **Status Check**: You are already authenticated as an ARCH bypass member.',
-        ephemeral: true,
-      });
-    }
-
-    if (codeInput !== Config.archSafeguardCode) {
-      console.log(`[Security Alert]: Failed ARCH authorization attempt by ${interaction.user.tag} using code "${codeInput}".`);
-      return interaction.reply({
-        content: '❌ **Authorization Failed**: Invalid safeguard code.',
-        ephemeral: true,
-      });
-    }
-
-    try {
-      client.archUsers.add(userId);
-      console.log(`[Security Alert]: User ${interaction.user.tag} (${userId}) successfully authenticated as ARCH.`);
-
-      // Grant connection allowance overrides on all currently locked channels
-      for (const channelId of client.lockedChannels.keys()) {
-        const lockedChannel = interaction.guild?.channels.cache.get(channelId) as VoiceChannel | undefined;
-        if (lockedChannel && verifyBotChannelPermissions(interaction, lockedChannel)) {
-          await lockedChannel.permissionOverwrites.create(userId, {
-            Connect: true,
-          }).catch(() => {});
-        }
-      }
-
-      await interaction.reply({
-        content: '👑 **Authentication Successful**: You have been granted the **ARCH** bypass role.\n*You will now automatically bypass all voice locks, voice guards, and moderator locks.*',
-        ephemeral: true,
+        content: `✅ **KitKat Transfer**: Moved **${targetMember.user.tag}** to **${targetChannel.name}**.`,
       });
     } catch (error) {
-      console.error('[ARCH Registration Error]:', error);
-      await interaction.reply({ content: '❌ Failed to complete ARCH authentication.', ephemeral: true });
+      console.error('[KitKat Transfer Error]:', error);
+      await interaction.reply({ content: '❌ Failed to transfer the member.', ephemeral: true });
     }
-  }
+  },
 };

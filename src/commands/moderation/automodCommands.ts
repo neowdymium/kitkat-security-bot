@@ -5,11 +5,12 @@ import {
   GuildMember 
 } from 'discord.js';
 import { Database } from '../../database.js';
+import { memberHasGuildScope } from '../../lib/kitkatState.js';
 
 // Helper to check for automod administrative permissions
 function verifyAutomodPermissions(interaction: ChatInputCommandInteraction): boolean {
   const member = interaction.member as GuildMember;
-  return member.permissions.has(PermissionFlagsBits.ManageGuild) || Database.hasPermission(member.id, 'automod');
+  return member.permissions.has(PermissionFlagsBits.ManageGuild) || memberHasGuildScope(member, 'automod');
 }
 
 // ==========================================

@@ -2,20 +2,14 @@ import { Message, GuildMember, EmbedBuilder, Client } from 'discord.js';
 import { Database } from '../database.js';
 import { Config } from '../config.js';
 import { Pipeline } from './pipeline.js';
+import { isGuildDmAlertsEnabled, sendKitKatLog } from '../lib/kitkatState.js';
 
 // Unified helper to send audit logs to the configured log channel
 export async function sendAuditLog(client: Client, guildId: string, payload: { embeds: EmbedBuilder[] } | string): Promise<void> {
-  const channelId = Database.getLoggingChannelId();
-  if (!channelId) return;
-
   try {
-    const guild = client.guilds.cache.get(guildId);
-    const channel = guild?.channels.cache.get(channelId);
-    if (channel && 'send' in channel) {
-      await (channel as any).send(payload);
-    }
+    await sendKitKatLog(client, guildId, payload);
   } catch (error) {
-    console.error('[Audit Log Error]: Failed to dispatch audit log message:', error);
+    console.error('[KitKat Audit Log Error]: Failed to dispatch audit log message:', error);
   }
 }
 
@@ -232,9 +226,9 @@ const WordFilterMiddleware = async (ctx: MessageContext, next: () => Promise<voi
       }
 
       // Send warning DM if alerts are enabled
-      if (Database.getDmAlertsEnabled()) {
+      if (isGuildDmAlertsEnabled(ctx.client, message.guild!.id)) {
         await author.send({
-          content: `⚠️ **Moderation Notice**: Your message in **${message.guild!.name}** was deleted because it contained a blocked ${isLink ? 'link/domain' : 'phrase'}: **"${flaggedPhrase}"**.`,
+          content: `⚠️ **KitKat Notice**: Your message in **${message.guild!.name}** was deleted because it contained a blocked ${isLink ? 'link/domain' : 'phrase'}: **"${flaggedPhrase}"**.`,
         }).catch(() => {});
       }
 
@@ -252,7 +246,7 @@ const WordFilterMiddleware = async (ctx: MessageContext, next: () => Promise<voi
 
       await sendAuditLog(ctx.client, message.guild!.id, { embeds: [logEmbed] });
 
-      const notice = await (channel as any).send(`🛡️ **Auto-Mod**: Deleted message from **${author.tag}** containing blocked content.`);
+      const notice = await (channel as any).send(`🛡️ **KitKat Auto-Mod**: Deleted message from **${author.tag}** containing blocked content.`);
       setTimeout(() => notice.delete().catch(() => {}), 5000);
     } catch (error) {
       console.error('[Word Filter Middleware Error]:', error);

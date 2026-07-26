@@ -4,9 +4,19 @@ import {
   PermissionFlagsBits,
   GuildMember,
   EmbedBuilder,
-  Role
+  Role,
+  User,
+  ChannelType,
 } from 'discord.js';
-import { Database } from '../../database.js';
+import {
+  buildKitKatEmbed,
+  deleteGuildPermissionGrant,
+  getGuildState,
+  memberHasGuildScope,
+  setGuildDmAlerts,
+  setGuildLoggingChannel,
+  setGuildPermissionGrant,
+} from '../../lib/kitkatState.js';
 
 // ==========================================
 // 1. /config command (System Settings)
@@ -42,9 +52,9 @@ export const ConfigCommand = {
 
     // Check executor Discord Administrator permissions
     const member = interaction.member as GuildMember;
-    if (!member.permissions.has(PermissionFlagsBits.Administrator) && !Database.hasPermission(member.id, 'config')) {
+    if (!member.permissions.has(PermissionFlagsBits.Administrator) && !memberHasGuildScope(member, 'config')) {
       return interaction.reply({
-        content: '❌ **Access Denied**: You require Discord Administrator privileges or internal bot config scope to modify settings.',
+        content: '❌ **Access Denied**: You require Discord Administrator privileges or a KitKat config scope to modify settings.',
         ephemeral: true,
       });
     }
@@ -60,14 +70,14 @@ export const ConfigCommand = {
         });
       }
 
-      Database.setLoggingChannelId(channel.id);
+      setGuildLoggingChannel(interaction.client, interaction.guildId!, channel.id);
 
       await interaction.reply({
-        content: `✅ **Configuration Updated**: Security violation logs will be dispatched to <#${channel.id}>.`,
+        content: `✅ **Configuration Updated**: KitKat security violation logs will be dispatched to <#${channel.id}>.`,
       });
     } else if (sub === 'dm_alerts') {
       const enabled = interaction.options.getBoolean('enabled', true);
-      Database.setDmAlertsEnabled(enabled);
+      setGuildDmAlerts(interaction.client, interaction.guildId!, enabled);
 
       await interaction.reply({
         content: `✅ **Configuration Updated**: Direct Message warnings are now **${enabled ? 'ENABLED' : 'DISABLED'}**.`,
@@ -82,12 +92,12 @@ export const ConfigCommand = {
 export const PermCommand = {
   data: new SlashCommandBuilder()
     .setName('perm')
-    .setDescription('Manage bot-specific command execution permissions separate from Discord roles.')
+    .setDescription('Manage KitKat-specific command execution permissions for users or roles.')
     .addSubcommand((sub) =>
       sub
         .setName('add')
-        .setDescription('Grant bot command permissions to a member.')
-        .addUserOption((opt) => opt.setName('user').setDescription('The member').setRequired(true))
+        .setDescription('Grant KitKat command permissions to a user or role.')
+        .addMentionableOption((opt) => opt.setName('target').setDescription('User or role').setRequired(true))
         .addStringOption((opt) =>
           opt
             .setName('scope')
@@ -98,8 +108,8 @@ export const PermCommand = {
     .addSubcommand((sub) =>
       sub
         .setName('remove')
-        .setDescription('Revoke all bot command permissions from a member.')
-        .addUserOption((opt) => opt.setName('user').setDescription('The member').setRequired(true))
+        .setDescription('Revoke all KitKat command permissions from a user or role.')
+        .addMentionableOption((opt) => opt.setName('target').setDescription('User or role').setRequired(true))
     ),
   async execute(interaction: ChatInputCommandInteraction) {
     const sub = interaction.options.getSubcommand();
@@ -108,34 +118,37 @@ export const PermCommand = {
     // Only actual Server Administrators can manage internal bot permissions
     if (!executor.permissions.has(PermissionFlagsBits.Administrator)) {
       return interaction.reply({
-        content: '❌ **Access Denied**: Only server administrators can edit bot internal scopes.',
+        content: '❌ **Access Denied**: Only server administrators can edit KitKat internal scopes.',
         ephemeral: true,
       });
     }
 
-    const targetUser = interaction.options.getUser('user', true);
+    const target = interaction.options.getMentionable('target', true) as Role | User;
 
     if (sub === 'add') {
       const scopeInput = interaction.options.getString('scope', true);
 
       // Parse scopes (trim, convert to lowercase)
       const scopes = scopeInput.split(',').map((s) => s.trim().toLowerCase());
-
-      Database.addUserPermissions(targetUser.id, scopes);
+      const kind = target instanceof Role ? 'role' : 'user';
+      const targetId = target.id;
+      setGuildPermissionGrant(interaction.client, interaction.guildId!, targetId, kind, scopes);
+      const targetLabel = target instanceof Role ? target.name : target.tag;
 
       await interaction.reply({
-        content: `✅ **Permissions Granted**: Granted scopes (\`${scopes.join(', ')}\`) to **${targetUser.tag}**.`,
+        content: `✅ **Permissions Granted**: Granted scopes (\`${scopes.join(', ')}\`) to **${targetLabel}**.`,
       });
     } else if (sub === 'remove') {
-      const removed = Database.removeUserPermissions(targetUser.id);
+      const removed = deleteGuildPermissionGrant(interaction.client, interaction.guildId!, target.id);
+      const targetLabel = target instanceof Role ? target.name : target.tag;
 
       if (removed) {
         await interaction.reply({
-          content: `✅ **Permissions Revoked**: Cleared all internal bot permissions from **${targetUser.tag}**.`,
+          content: `✅ **Permissions Revoked**: Cleared all KitKat permissions from **${targetLabel}**.`,
         });
       } else {
         await interaction.reply({
-          content: `ℹ️ **Status Check**: **${targetUser.tag}** has no registered internal permissions.`,
+          content: `ℹ️ **Status Check**: **${targetLabel}** has no registered KitKat permissions.`,
           ephemeral: true,
         });
       }
@@ -170,9 +183,9 @@ export const RoleCommand = {
     const bot = interaction.guild?.members.me;
 
     // Permissions check
-    if (!executor.permissions.has(PermissionFlagsBits.ManageRoles) && !Database.hasPermission(executor.id, 'role')) {
+    if (!executor.permissions.has(PermissionFlagsBits.ManageRoles) && !memberHasGuildScope(executor, 'role')) {
       return interaction.reply({
-        content: '❌ **Access Denied**: You require the Discord "Manage Roles" permission or bot internal role scope.',
+        content: '❌ **Access Denied**: You require the Discord "Manage Roles" permission or a KitKat role scope.',
         ephemeral: true,
       });
     }
@@ -249,10 +262,11 @@ export const HelpCommand = {
     .setName('help')
     .setDescription('Displays the categorized help directory for all commands and permissions.'),
   async execute(interaction: ChatInputCommandInteraction) {
-    const embed = new EmbedBuilder()
-      .setColor(0x00aaff)
-      .setTitle('🛡️ Bot Security & Moderation Directory')
-      .setDescription('Listing all slash commands, descriptions, and required permissions. Restricted commands are reserved for whitelisted members or those with corresponding internal scopes.')
+    const embed = buildKitKatEmbed(
+      '🛡️ KitKat Security & Moderation Directory',
+      'Listing all slash commands, descriptions, and required permissions. Restricted commands are reserved for approved members, authorized roles, or users granted KitKat scopes.',
+      0x00aaff
+    )
       .addFields(
         {
           name: '🔨 Server Moderation & Sanctions',
@@ -288,16 +302,15 @@ export const HelpCommand = {
         {
           name: '⚙️ Administration & Utility',
           value: [
-            '`/config logging <#channel>` - Set audit logging channel.',
-            '`/config dm_alerts <true|false>` - Toggle DM alerts on message deletion.',
-            '`/perm <add|remove> @user [scope]` - Manage bot-specific scopes.',
-            '`/tell <#channel> <message>` - Send bot message broadcast (logs moderator).',
-            '`/arch <code>` - Authenticates user to global ARCH bypass role.'
+            '`/config logging <#channel>` - Set KitKat audit logging channel.',
+            '`/config dm_alerts <true|false>` - Toggle KitKat DM alerts.',
+            '`/perm <add|remove> @user|@role [scope]` - Manage KitKat-specific scopes.',
+            '`/tell <#channel> <message>` - Send a KitKat broadcast message.',
+            '`/arch <code>` - Authenticate into the ARCH system.'
           ].join('\n'),
         }
       )
-      .setFooter({ text: 'Designed for high security server moderation.' })
-      .setTimestamp();
+      ;
 
     await interaction.reply({ embeds: [embed] });
   }

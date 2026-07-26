@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 // Verify critical configuration properties are set
-const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID', 'GUILD_ID', 'ARCH_SAFEGUARD_CODE'];
+const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID', 'DEV_ID'];
 for (const envVar of requiredEnv) {
   if (!process.env[envVar]) {
     console.warn(`[Config Warning]: Environment variable ${envVar} is missing. Please set it in your .env file.`);
@@ -22,29 +22,17 @@ for (const envVar of requiredEnv) {
  * Exposes type-safe environment configuration and default rule parameters.
  */
 export const Config = {
+  botName: 'KitKat',
   // Credentials
   token: process.env.DISCORD_TOKEN || '',
   clientId: process.env.CLIENT_ID || '',
-  guildId: process.env.GUILD_ID || '',
+  devId: process.env.DEV_ID || '',
 
-  // Safeguard authentication code for the ARCH bypass role
-  archSafeguardCode: process.env.ARCH_SAFEGUARD_CODE || 'SUPER_SECRET_ARCH_CODE_123',
-
-  // Whitelisted Users: Whitelisted user IDs or usernames who are permitted to run restricted commands:
-  // (/vclock, /vcunlock, /guard, /unguard, /mute, /unmute)
-  // Can be configured in .env as a comma-separated list of IDs, e.g. WHITELISTED_USERS=123456789,987654321
-  whitelistedUsers: new Set<string>(
-    process.env.WHITELISTED_USERS
-      ? process.env.WHITELISTED_USERS.split(',').map((id) => id.trim())
-      : ['developer_id_placeholder'] // Fallback/default IDs or usernames
-  ),
-
-  // Guard Blacklist IDs: User IDs that are blocked from entering guarded voice channels
-  guardBlacklistIds: new Set<string>(
-    process.env.GUARD_BLACKLIST_IDS
-      ? process.env.GUARD_BLACKLIST_IDS.split(',').map((id) => id.trim())
-      : ['blacklist_id_placeholder'] // Example blocked IDs
-  ),
+  // Safeguard authentication code for the ARCH system
+  archSafeguardCode:
+    process.env.SUPER_SECRET_ARCH_CODE ||
+    process.env.ARCH_SAFEGUARD_CODE ||
+    'SUPER_SECRET_ARCH_CODE_123',
 
   // Banned keywords or regex patterns for the automod filter
   bannedWords: [
