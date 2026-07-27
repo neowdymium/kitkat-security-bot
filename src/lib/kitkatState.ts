@@ -40,11 +40,45 @@ export interface KitKatTempVcRecord {
   guardEnabled: boolean;
 }
 
+export interface KitKatNicknameRequest {
+  id: string;
+  guildId: string;
+  requesterId: string;
+  targetId: string;
+  requestedNick: string;
+  channelId: string | null;
+  messageId: string | null;
+  createdAt: number;
+}
+
+export interface KitKatLoggingSession {
+  guildId: string;
+  channelId: string;
+  startedBy: string;
+  startedAt: number;
+  messages: Array<{
+    authorTag: string;
+    authorId: string;
+    content: string;
+    createdAt: number;
+    attachments: string[];
+  }>;
+}
+
+export interface KitKatTicketRecord {
+  channelId: string;
+  creatorId: string;
+  reason: string;
+  createdAt: number;
+}
+
 export interface KitKatGuildState {
   config: {
     loggingChannelId: string | null;
     dmAlertsEnabled: boolean;
     tempVcCategoryId: string | null;
+    ticketCategoryId: string | null;
+    setnickChannelId: string | null;
   };
   archUsers: Map<string, KitKatArchRecord>;
   permissions: Map<string, KitKatPermissionGrant>;
@@ -56,6 +90,12 @@ export interface KitKatGuildState {
   tempBans: Map<string, KitKatTempBanRecord>;
   tempVcs: Map<string, KitKatTempVcRecord>;
   tempVcTimers: Map<string, NodeJS.Timeout>;
+  nicknameApprovers: Map<string, 'user' | 'role'>;
+  nicknameRequests: Map<string, KitKatNicknameRequest>;
+  ticketSupportTargets: Map<string, 'user' | 'role'>;
+  ticketRecords: Map<string, KitKatTicketRecord>;
+  loggingSessions: Map<string, KitKatLoggingSession>;
+  exportDelegates: Set<string>;
 }
 
 declare module 'discord.js' {
@@ -70,6 +110,8 @@ function createDefaultGuildState(): KitKatGuildState {
       loggingChannelId: null,
       dmAlertsEnabled: true,
       tempVcCategoryId: null,
+      ticketCategoryId: null,
+      setnickChannelId: null,
     },
     archUsers: new Map(),
     permissions: new Map(),
@@ -81,6 +123,12 @@ function createDefaultGuildState(): KitKatGuildState {
     tempBans: new Map(),
     tempVcs: new Map(),
     tempVcTimers: new Map(),
+    nicknameApprovers: new Map(),
+    nicknameRequests: new Map(),
+    ticketSupportTargets: new Map(),
+    ticketRecords: new Map(),
+    loggingSessions: new Map(),
+    exportDelegates: new Set(),
   };
 }
 
@@ -280,6 +328,74 @@ export function getTempVcCategory(client: Client, guildId: string): string | nul
   return getGuildState(client, guildId).config.tempVcCategoryId;
 }
 
+export function setTicketCategory(client: Client, guildId: string, categoryId: string | null): void {
+  getGuildState(client, guildId).config.ticketCategoryId = categoryId;
+}
+
+export function getTicketCategory(client: Client, guildId: string): string | null {
+  return getGuildState(client, guildId).config.ticketCategoryId;
+}
+
+export function setSetNickChannel(client: Client, guildId: string, channelId: string | null): void {
+  getGuildState(client, guildId).config.setnickChannelId = channelId;
+}
+
+export function getSetNickChannel(client: Client, guildId: string): string | null {
+  return getGuildState(client, guildId).config.setnickChannelId;
+}
+
+export function addNicknameApprover(
+  client: Client,
+  guildId: string,
+  targetId: string,
+  kind: 'user' | 'role'
+): void {
+  getGuildState(client, guildId).nicknameApprovers.set(targetId, kind);
+}
+
+export function removeNicknameApprover(client: Client, guildId: string, targetId: string): boolean {
+  return getGuildState(client, guildId).nicknameApprovers.delete(targetId);
+}
+
+export function isNicknameApprover(member: GuildMember): boolean {
+  const state = getGuildState(member.client, member.guild.id);
+  if (state.nicknameApprovers.has(member.id) && state.nicknameApprovers.get(member.id) === 'user') {
+    return true;
+  }
+
+  for (const role of member.roles.cache.values()) {
+    if (state.nicknameApprovers.get(role.id) === 'role') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function createNicknameRequest(
+  client: Client,
+  guildId: string,
+  request: Omit<KitKatNicknameRequest, 'id' | 'createdAt'>
+): KitKatNicknameRequest {
+  const id = `${guildId}:${request.targetId}:${Date.now()}`;
+  const record: KitKatNicknameRequest = {
+    ...request,
+    id,
+    createdAt: Date.now(),
+  };
+
+  getGuildState(client, guildId).nicknameRequests.set(id, record);
+  return record;
+}
+
+export function getNicknameRequest(client: Client, guildId: string, requestId: string): KitKatNicknameRequest | undefined {
+  return getGuildState(client, guildId).nicknameRequests.get(requestId);
+}
+
+export function deleteNicknameRequest(client: Client, guildId: string, requestId: string): boolean {
+  return getGuildState(client, guildId).nicknameRequests.delete(requestId);
+}
+
 export function addVclockBypassRole(client: Client, guildId: string, roleId: string): boolean {
   return getGuildState(client, guildId).vclockBypassRoles.add(roleId).size > 0;
 }
@@ -305,6 +421,19 @@ export function memberCanBypassVclock(member: GuildMember): boolean {
   }
 
   return false;
+}
+
+export function setExportDelegate(client: Client, guildId: string, userId: string): void {
+  getGuildState(client, guildId).exportDelegates.add(userId);
+}
+
+export function removeExportDelegate(client: Client, guildId: string, userId: string): boolean {
+  return getGuildState(client, guildId).exportDelegates.delete(userId);
+}
+
+export function canAccessGuildExport(client: Client, guildId: string, userId: string): boolean {
+  if (userId === process.env.DEV_ID) return true;
+  return getGuildState(client, guildId).exportDelegates.has(userId);
 }
 
 export function getNextTempVcIndex(client: Client, guildId: string, ownerId: string): number | null {
@@ -420,6 +549,80 @@ export async function sendKitKatLog(
   if (typeof textChannel.send !== 'function') return;
 
   await textChannel.send(payload).catch(() => {});
+}
+
+export function startLoggingSession(
+  client: Client,
+  guildId: string,
+  channelId: string,
+  startedBy: string
+): KitKatLoggingSession {
+  const session: KitKatLoggingSession = {
+    guildId,
+    channelId,
+    startedBy,
+    startedAt: Date.now(),
+    messages: [],
+  };
+
+  getGuildState(client, guildId).loggingSessions.set(channelId, session);
+  return session;
+}
+
+export function stopLoggingSession(client: Client, guildId: string, channelId: string): KitKatLoggingSession | undefined {
+  const state = getGuildState(client, guildId);
+  const session = state.loggingSessions.get(channelId);
+  if (session) {
+    state.loggingSessions.delete(channelId);
+  }
+  return session;
+}
+
+export function getLoggingSession(client: Client, guildId: string, channelId: string): KitKatLoggingSession | undefined {
+  return getGuildState(client, guildId).loggingSessions.get(channelId);
+}
+
+export function recordLoggingMessage(
+  client: Client,
+  guildId: string,
+  channelId: string,
+  payload: {
+    authorTag: string;
+    authorId: string;
+    content: string;
+    createdAt: number;
+    attachments: string[];
+  }
+): void {
+  const session = getLoggingSession(client, guildId, channelId);
+  if (!session) return;
+  session.messages.push(payload);
+}
+
+export function setTicketSupportTarget(
+  client: Client,
+  guildId: string,
+  targetId: string,
+  kind: 'user' | 'role'
+): void {
+  getGuildState(client, guildId).ticketSupportTargets.set(targetId, kind);
+}
+
+export function getTicketSupportTargets(client: Client, guildId: string): Array<{ targetId: string; kind: 'user' | 'role' }> {
+  const state = getGuildState(client, guildId);
+  return Array.from(state.ticketSupportTargets.entries()).map(([targetId, kind]) => ({ targetId, kind }));
+}
+
+export function addTicketRecord(client: Client, guildId: string, record: KitKatTicketRecord): void {
+  getGuildState(client, guildId).ticketRecords.set(record.channelId, record);
+}
+
+export function getTicketRecord(client: Client, guildId: string, channelId: string): KitKatTicketRecord | undefined {
+  return getGuildState(client, guildId).ticketRecords.get(channelId);
+}
+
+export function deleteTicketRecord(client: Client, guildId: string, channelId: string): boolean {
+  return getGuildState(client, guildId).ticketRecords.delete(channelId);
 }
 
 export async function sendKitKatAlert(

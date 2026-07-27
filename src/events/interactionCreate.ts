@@ -1,4 +1,10 @@
-import { Events, Interaction } from 'discord.js';
+import { Events, Interaction, ButtonInteraction, GuildMember } from 'discord.js';
+import {
+  deleteNicknameRequest,
+  getNicknameRequest,
+  isNicknameApprover,
+} from '../lib/kitkatState.js';
+import { buildKitKatEmbed } from '../lib/kitkatState.js';
 
 /**
  * Handles incoming interactions from the Discord Gateway.
@@ -8,6 +14,11 @@ export default {
   name: Events.InteractionCreate,
   once: false,
   async execute(interaction: Interaction) {
+    if (interaction.isButton()) {
+      await handleButtonInteraction(interaction);
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const { client, commandName, user, guild } = interaction;
@@ -37,3 +48,56 @@ export default {
     }
   },
 };
+
+async function handleButtonInteraction(interaction: ButtonInteraction): Promise<void> {
+  if (!interaction.guildId) {
+    await interaction.reply({ content: '❌ This action can only be used inside a server.', ephemeral: true });
+    return;
+  }
+
+  if (!interaction.customId.startsWith('kitkat:nick:approve:')) {
+    return;
+  }
+
+  const requestId = interaction.customId.slice('kitkat:nick:approve:'.length);
+  const request = getNicknameRequest(interaction.client, interaction.guildId, requestId);
+
+  if (!request) {
+    await interaction.reply({ content: '❌ This nickname request no longer exists.', ephemeral: true });
+    return;
+  }
+
+  if (!interaction.member || !('roles' in interaction.member)) {
+    await interaction.reply({ content: '❌ Unable to validate your approval role.', ephemeral: true });
+    return;
+  }
+
+  const approverAllowed = isNicknameApprover(interaction.member as GuildMember);
+  if (!approverAllowed) {
+    await interaction.reply({ content: '❌ You are not authorized to approve nickname requests.', ephemeral: true });
+    return;
+  }
+
+  const guild = interaction.guild!;
+  const target = await guild.members.fetch(request.targetId).catch(() => null);
+  if (!target) {
+    deleteNicknameRequest(interaction.client, interaction.guildId, requestId);
+    await interaction.reply({ content: '❌ The target member is no longer in this server.', ephemeral: true });
+    return;
+  }
+
+  await target.setNickname(request.requestedNick, `KitKat nickname approved by ${interaction.user.tag}`).catch(() => {});
+  deleteNicknameRequest(interaction.client, interaction.guildId, requestId);
+
+  const embed = buildKitKatEmbed(
+    '✅ KitKat Nickname Approved',
+    `Nickname request for <@${request.targetId}> was approved by <@${interaction.user.id}>.`,
+    0x00cc66
+  );
+
+  if (interaction.message && 'edit' in interaction.message) {
+    await interaction.message.edit({ embeds: [embed], components: [] }).catch(() => {});
+  }
+
+  await interaction.reply({ content: `✅ Approved nickname change for <@${request.targetId}>.`, ephemeral: true });
+}

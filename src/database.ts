@@ -72,6 +72,12 @@ export const Database = {
     return true;
   },
 
+  replaceBlockedTexts(phrases: string[]): void {
+    const db = readDb();
+    db.blockedTexts = Array.from(new Set(phrases.map((phrase) => phrase.trim().toLowerCase()).filter(Boolean)));
+    writeDb(db);
+  },
+
   removeBlockedText(phrase: string): boolean {
     const db = readDb();
     const cleanPhrase = phrase.trim().toLowerCase();
@@ -94,6 +100,14 @@ export const Database = {
     db.blockedLinks.push(cleanDomain);
     writeDb(db);
     return true;
+  },
+
+  replaceBlockedLinks(domains: string[]): void {
+    const db = readDb();
+    db.blockedLinks = Array.from(
+      new Set(domains.map((domain) => domain.trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '')).filter(Boolean))
+    );
+    writeDb(db);
   },
 
   removeBlockedLink(domain: string): boolean {

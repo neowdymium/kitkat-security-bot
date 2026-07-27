@@ -322,25 +322,29 @@ export const GuardCommand = {
       });
     }
 
-    const state = getGuildState(interaction.client, interaction.guildId!);
-    const tempVc = state.tempVcs.get(voiceChannel.id);
-
-    if (!tempVc) {
+    if (!canUseKitKatRestrictedCommand(member, 'guard')) {
       return interaction.reply({
-        content: '❌ `/guard` only works inside KitKat temporary voice channels.',
+        content: '❌ You need a KitKat `guard` scope or administrator access to use this command.',
         ephemeral: true,
       });
     }
 
-    if (tempVc.ownerId !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    if (state.guardedChannels.has(voiceChannel.id)) {
       return interaction.reply({
-        content: `❌ Only the temp VC owner (<@${tempVc.ownerId}>) or an ARCH member can enable guard mode.`,
+        content: '❌ This voice channel is already guarded.',
+        ephemeral: true,
+      });
+    }
+
+    if (state.lockedChannels.has(voiceChannel.id) && state.lockedChannels.get(voiceChannel.id) !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+      return interaction.reply({
+        content: `❌ Only the channel owner (<@${state.lockedChannels.get(voiceChannel.id)}>) or an ARCH member can enable guard mode.`,
         ephemeral: true,
       });
     }
 
     state.guardedChannels.set(voiceChannel.id, interaction.user.id);
-    tempVc.guardEnabled = true;
 
     const embed = buildKitKatEmbed(
       '🛡️ KitKat Guard Enabled',
@@ -374,25 +378,30 @@ export const UnguardCommand = {
       });
     }
 
-    const state = getGuildState(interaction.client, interaction.guildId!);
-    const tempVc = state.tempVcs.get(voiceChannel.id);
-
-    if (!tempVc) {
+    if (!canUseKitKatRestrictedCommand(member, 'guard')) {
       return interaction.reply({
-        content: '❌ `/unguard` only works inside KitKat temporary voice channels.',
+        content: '❌ You need a KitKat `guard` scope or administrator access to use this command.',
         ephemeral: true,
       });
     }
 
-    if (tempVc.ownerId !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+    const state = getGuildState(interaction.client, interaction.guildId!);
+    const guardOwner = state.guardedChannels.get(voiceChannel.id);
+    if (!guardOwner) {
       return interaction.reply({
-        content: `❌ Only the temp VC owner (<@${tempVc.ownerId}>) or an ARCH member can disable guard mode.`,
+        content: '❌ This voice channel is not currently guarded.',
+        ephemeral: true,
+      });
+    }
+
+    if (guardOwner !== interaction.user.id && !isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+      return interaction.reply({
+        content: `❌ Only the guard owner (<@${guardOwner}>) or an ARCH member can disable guard mode.`,
         ephemeral: true,
       });
     }
 
     state.guardedChannels.delete(voiceChannel.id);
-    tempVc.guardEnabled = false;
 
     const embed = buildKitKatEmbed(
       '🛡️ KitKat Guard Disabled',

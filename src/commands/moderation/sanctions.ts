@@ -3,20 +3,31 @@ import {
   ChatInputCommandInteraction,
   PermissionFlagsBits,
   GuildMember,
+  Role,
   EmbedBuilder,
   User,
   VoiceChannel,
   PermissionOverwriteOptions,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } from 'discord.js';
 import ms from 'ms';
 import {
   buildKitKatEmbed,
+  createNicknameRequest,
+  deleteNicknameRequest,
   getGuildState,
+  getSetNickChannel,
   isGuildArch,
+  isNicknameApprover,
   memberHasGuildScope,
+  addNicknameApprover,
   sendKitKatAlert,
   sendKitKatLog,
+  setSetNickChannel,
 } from '../../lib/kitkatState.js';
+import { sendDeveloperBackup } from '../../utils/stateSnapshots.js';
 
 function canModerateWithScope(member: GuildMember, scope: string, permission: bigint): boolean {
   return member.permissions.has(permission) || memberHasGuildScope(member, scope);
@@ -40,6 +51,14 @@ function moderationBlockedReason(member: GuildMember, target: GuildMember): stri
   }
 
   return null;
+}
+
+function isRoleMentionable(value: Role | User): value is Role {
+  return 'position' in value;
+}
+
+function labelForMentionable(value: Role | User): string {
+  return isRoleMentionable(value) ? value.name : value.tag;
 }
 
 async function ensureTargetHierarchy(
@@ -125,6 +144,33 @@ async function muteVoiceChannelMembers(
     } else {
       await member.voice.setMute(false, `KitKat bulk unmute by ${executor.user.tag}`).catch(() => {});
     }
+    affected += 1;
+  }
+
+  return affected;
+}
+
+async function deafenVoiceChannelMembers(
+  interaction: ChatInputCommandInteraction,
+  voiceChannel: VoiceChannel,
+  deafenState: boolean
+): Promise<number> {
+  const executor = interaction.member as GuildMember;
+  const bot = interaction.guild?.members.me;
+
+  if (!bot || !bot.permissions.has(PermissionFlagsBits.DeafenMembers)) {
+    throw new Error('KitKat lacks the permissions required to deafen members.');
+  }
+
+  const targetMembers = Array.from(voiceChannel.members.values()).filter((member) => !member.user.bot);
+  let affected = 0;
+
+  for (const member of targetMembers) {
+    if (isGuildArch(member.client, member.guild.id, member.id)) {
+      continue;
+    }
+
+    await member.voice.setDeaf(deafenState, `KitKat bulk ${deafenState ? 'deafen' : 'undeafen'} by ${executor.user.tag}`).catch(() => {});
     affected += 1;
   }
 
@@ -598,15 +644,56 @@ export const TempBanCommand = {
 export const DeafenCommand = {
   data: new SlashCommandBuilder()
     .setName('deafen')
-    .setDescription('Deafens a member in a voice channel.')
-    .addUserOption((option) =>
-      option.setName('target').setDescription('The member to server-deafen').setRequired(true)
+    .setDescription('Deafens one member or everyone in your current voice channel.')
+    .addSubcommand((sub) =>
+      sub
+        .setName('user')
+        .setDescription('Server-deafen one member.')
+        .addUserOption((option) =>
+          option.setName('target').setDescription('The member to server-deafen').setRequired(true)
+        )
+        .addStringOption((option) =>
+          option.setName('reason').setDescription('Reason for deafening').setRequired(false)
+        )
     )
-    .addStringOption((option) =>
-      option.setName('reason').setDescription('Reason for deafening').setRequired(false)
+    .addSubcommand((sub) =>
+      sub
+        .setName('all')
+        .setDescription('Server-deafen every member in your current voice channel.')
     ),
   async execute(interaction: ChatInputCommandInteraction) {
     const executor = interaction.member as GuildMember;
+    const sub = interaction.options.getSubcommand();
+    const voiceChannel = executor.voice.channel as VoiceChannel | null;
+
+    if (!canModerateWithScope(executor, 'deafen', PermissionFlagsBits.DeafenMembers)) {
+      return interaction.reply({
+        content: '❌ You need Deafen Members or a KitKat `deafen` scope to use this command.',
+        ephemeral: true,
+      });
+    }
+
+    if (sub === 'all') {
+      if (!voiceChannel) {
+        return interaction.reply({ content: '❌ Join a voice channel before using `/deafen all`.', ephemeral: true });
+      }
+
+      if (!voiceChannel.members.size) {
+        return interaction.reply({ content: '❌ There are no connected members to deafen.', ephemeral: true });
+      }
+
+      try {
+        const affected = await deafenVoiceChannelMembers(interaction, voiceChannel, true);
+        await interaction.reply({
+          content: `🔇 **KitKat Deafen**: Deafened **${affected}** members in **${voiceChannel.name}**.`,
+        });
+      } catch (error) {
+        console.error('[KitKat Deafen All Error]:', error);
+        await interaction.reply({ content: '❌ Failed to deafen everyone in the voice channel.', ephemeral: true });
+      }
+      return;
+    }
+
     const targetUser = interaction.options.getUser('target', true);
     const reason = interaction.options.getString('reason') || 'No reason provided';
     const target = await fetchMemberIfPresent(interaction, targetUser.id);
@@ -618,13 +705,6 @@ export const DeafenCommand = {
     const blocked = moderationBlockedReason(executor, target);
     if (blocked) {
       return interaction.reply({ content: `❌ ${blocked}`, ephemeral: true });
-    }
-
-    if (!canModerateWithScope(executor, 'deafen', PermissionFlagsBits.DeafenMembers)) {
-      return interaction.reply({
-        content: '❌ You need Deafen Members or a KitKat `deafen` scope to use this command.',
-        ephemeral: true,
-      });
     }
 
     if (!target.voice.channel) {
@@ -644,12 +724,53 @@ export const DeafenCommand = {
 export const UndeafenCommand = {
   data: new SlashCommandBuilder()
     .setName('undeafen')
-    .setDescription('Undeafens a member in a voice channel.')
-    .addUserOption((option) =>
-      option.setName('target').setDescription('The member to server-undeafen').setRequired(true)
+    .setDescription('Undeafens one member or everyone in your current voice channel.')
+    .addSubcommand((sub) =>
+      sub
+        .setName('user')
+        .setDescription('Remove server-deafen from one member.')
+        .addUserOption((option) =>
+          option.setName('target').setDescription('The member to server-undeafen').setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('all')
+        .setDescription('Remove server-deafen from everyone in your current voice channel.')
     ),
   async execute(interaction: ChatInputCommandInteraction) {
     const executor = interaction.member as GuildMember;
+    if (!canModerateWithScope(executor, 'undeafen', PermissionFlagsBits.DeafenMembers)) {
+      return interaction.reply({
+        content: '❌ You need Deafen Members or a KitKat `undeafen` scope to use this command.',
+        ephemeral: true,
+      });
+    }
+
+    const sub = interaction.options.getSubcommand();
+    const voiceChannel = executor.voice.channel as VoiceChannel | null;
+
+    if (sub === 'all') {
+      if (!voiceChannel) {
+        return interaction.reply({ content: '❌ Join a voice channel before using `/undeafen all`.', ephemeral: true });
+      }
+
+      if (!voiceChannel.members.size) {
+        return interaction.reply({ content: '❌ There are no connected members to undeafen.', ephemeral: true });
+      }
+
+      try {
+        const affected = await deafenVoiceChannelMembers(interaction, voiceChannel, false);
+        await interaction.reply({
+          content: `🔊 **KitKat Undeafen**: Restored audio access for **${affected}** members in **${voiceChannel.name}**.`,
+        });
+      } catch (error) {
+        console.error('[KitKat Undeafen All Error]:', error);
+        await interaction.reply({ content: '❌ Failed to undeafen everyone in the voice channel.', ephemeral: true });
+      }
+      return;
+    }
+
     const targetUser = interaction.options.getUser('target', true);
     const target = await fetchMemberIfPresent(interaction, targetUser.id);
 
@@ -660,13 +781,6 @@ export const UndeafenCommand = {
     const blocked = moderationBlockedReason(executor, target);
     if (blocked) {
       return interaction.reply({ content: `❌ ${blocked}`, ephemeral: true });
-    }
-
-    if (!canModerateWithScope(executor, 'undeafen', PermissionFlagsBits.DeafenMembers)) {
-      return interaction.reply({
-        content: '❌ You need Deafen Members or a KitKat `undeafen` scope to use this command.',
-        ephemeral: true,
-      });
     }
 
     if (!target.voice.channel) {
@@ -686,45 +800,127 @@ export const UndeafenCommand = {
 export const SetNickCommand = {
   data: new SlashCommandBuilder()
     .setName('setnick')
-    .setDescription("Changes a target user's nickname.")
-    .addUserOption((option) =>
-      option.setName('target').setDescription('The member').setRequired(true)
+    .setDescription('Request a nickname change or manage nickname approval settings.')
+    .addSubcommand((sub) =>
+      sub
+        .setName('request')
+        .setDescription('Submit your nickname change request for approval.')
+        .addStringOption((option) =>
+          option.setName('new_nick').setDescription('The requested nickname').setRequired(true)
+        )
     )
-    .addStringOption((option) =>
-      option.setName('nickname').setDescription('The new nickname (leave blank to reset)').setRequired(false)
+    .addSubcommandGroup((group) =>
+      group
+        .setName('config')
+        .setDescription('Manage nickname workflow settings.')
+        .addSubcommand((configSub) =>
+          configSub
+            .setName('channel')
+            .setDescription('Set the request review channel.')
+            .addChannelOption((option) =>
+              option.setName('channel').setDescription('Request channel').setRequired(true)
+            )
+        )
+        .addSubcommand((configSub) =>
+          configSub
+            .setName('approval')
+            .setDescription('Grant approval rights to a user or role.')
+            .addMentionableOption((option) =>
+              option.setName('target').setDescription('Approver target').setRequired(true)
+            )
+        )
     ),
   async execute(interaction: ChatInputCommandInteraction) {
+    const group = interaction.options.getSubcommandGroup(false);
+    const sub = interaction.options.getSubcommand();
     const executor = interaction.member as GuildMember;
-    const targetUser = interaction.options.getUser('target', true);
-    const nickname = interaction.options.getString('nickname') || null;
-    const target = await fetchMemberIfPresent(interaction, targetUser.id);
 
-    if (!target) {
-      return interaction.reply({ content: '❌ Target member not found.', ephemeral: true });
+    if (group === 'config' && sub === 'channel') {
+      if (!isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+        return interaction.reply({
+          content: '❌ Only ARCH members can configure nickname workflow settings.',
+          ephemeral: true,
+        });
+      }
+
+      const channel = interaction.options.getChannel('channel', true);
+      if (!('isTextBased' in channel) || !channel.isTextBased()) {
+        return interaction.reply({ content: '❌ Nickname requests must be posted in a text channel.', ephemeral: true });
+      }
+
+      setSetNickChannel(interaction.client, interaction.guildId!, channel.id);
+      await interaction.reply({ content: `✅ Nickname requests will be posted in <#${channel.id}>.` });
+      await sendDeveloperBackup(interaction.client, interaction.guildId!, ['config', 'setnick']);
+      return;
     }
 
-    const blocked = moderationBlockedReason(executor, target);
-    if (blocked) {
-      return interaction.reply({ content: `❌ ${blocked}`, ephemeral: true });
+    if (group === 'config' && sub === 'approval') {
+      if (!isGuildArch(interaction.client, interaction.guildId!, interaction.user.id)) {
+        return interaction.reply({
+          content: '❌ Only ARCH members can configure nickname workflow settings.',
+          ephemeral: true,
+        });
+      }
+
+      const target = interaction.options.getMentionable('target', true) as Role | User;
+      addNicknameApprover(interaction.client, interaction.guildId!, target.id, isRoleMentionable(target) ? 'role' : 'user');
+      await interaction.reply({
+        content: `✅ Added **${labelForMentionable(target)}** as a nickname approver.`,
+      });
+      await sendDeveloperBackup(interaction.client, interaction.guildId!, ['config', 'setnick']);
+      return;
     }
 
-    if (!canModerateWithScope(executor, 'setnick', PermissionFlagsBits.ManageNicknames)) {
+    if (sub !== 'request') {
+      return interaction.reply({ content: '❌ Unknown setnick subcommand.', ephemeral: true });
+    }
+
+    const newNick = interaction.options.getString('new_nick', true);
+    const requestChannelId = getSetNickChannel(interaction.client, interaction.guildId!);
+    const targetMember = interaction.member as GuildMember;
+
+    if (!requestChannelId) {
       return interaction.reply({
-        content: '❌ You need Manage Nicknames or a KitKat `setnick` scope to use this command.',
+        content: '❌ No nickname request review channel is configured.',
         ephemeral: true,
       });
     }
 
-    try {
-      await target.setNickname(nickname, `KitKat nickname change by ${interaction.user.tag}`);
-      await interaction.reply({
-        content: nickname
-          ? `📝 **KitKat Nickname**: Changed **${target.user.tag}** to **${nickname}**.`
-          : `📝 **KitKat Nickname**: Reset **${target.user.tag}** to their default nickname.`,
+    const requestChannel = interaction.guild!.channels.cache.get(requestChannelId);
+    if (!requestChannel || !('send' in requestChannel)) {
+      return interaction.reply({
+        content: '❌ The configured nickname request channel is unavailable.',
+        ephemeral: true,
       });
-    } catch (error) {
-      console.error('[KitKat SetNick Error]:', error);
-      await interaction.reply({ content: '❌ Failed to update the nickname.', ephemeral: true });
     }
+
+    const request = createNicknameRequest(interaction.client, interaction.guildId!, {
+      guildId: interaction.guildId!,
+      requesterId: interaction.user.id,
+      targetId: targetMember.id,
+      requestedNick: newNick,
+      channelId: requestChannelId,
+      messageId: null,
+    });
+
+    const button = new ButtonBuilder()
+      .setCustomId(`kitkat:nick:approve:${request.id}`)
+      .setLabel('Approve Request')
+      .setStyle(ButtonStyle.Success);
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+    const embed = buildKitKatEmbed(
+      '📝 KitKat Nickname Request',
+      `**Requester:** <@${interaction.user.id}>\n**Requested Nickname:** \`${newNick}\`\n**Member:** <@${targetMember.id}>`,
+      0x4f46e5
+    );
+
+    const sent = await (requestChannel as any).send({ embeds: [embed], components: [row] });
+    request.messageId = sent.id;
+
+  await interaction.reply({
+      content: 'Your nickname change request has been received and is waiting for approval.',
+      ephemeral: true,
+    });
   },
 };

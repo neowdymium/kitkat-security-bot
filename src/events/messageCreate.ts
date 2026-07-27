@@ -1,5 +1,6 @@
 import { Events, Message } from 'discord.js';
 import { runMessagePipeline } from '../middleware/messagePipeline.js';
+import { getLoggingSession, recordLoggingMessage } from '../lib/kitkatState.js';
 
 /**
  * Handles the gateway messageCreate event.
@@ -16,6 +17,17 @@ export default {
     if (!message.guild || !message.member) return;
 
     try {
+      const session = getLoggingSession(message.client, message.guild.id, message.channel.id);
+      if (session) {
+        recordLoggingMessage(message.client, message.guild.id, message.channel.id, {
+          authorTag: message.author.tag,
+          authorId: message.author.id,
+          content: message.content,
+          createdAt: message.createdTimestamp,
+          attachments: Array.from(message.attachments.values()).map((attachment) => attachment.url),
+        });
+      }
+
       // Execute the message filtering and moderation pipeline
       await runMessagePipeline(message, message.client);
     } catch (error) {
