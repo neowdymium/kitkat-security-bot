@@ -20,6 +20,7 @@ export interface GuildDatabaseSchema {
   // Active temporary kicks and bans persisted to survive bot crashes/restarts
   tempKicks: Record<string, { expiresAt: number; moderatorId: string; reason: string }>;
   tempBans: Record<string, { expiresAt: number; moderatorId: string; reason: string }>;
+  afkChannelId: string | null;
 }
 
 // The database structure maps each guildId to its specific GuildDatabaseSchema
@@ -74,6 +75,7 @@ function getGuildData(db: DatabaseSchema, guildId: string): GuildDatabaseSchema 
         spamExemptUsers: oldDb.spamExemptUsers || [],
         tempKicks: (oldDb as any).tempKicks || {},
         tempBans: (oldDb as any).tempBans || {},
+        afkChannelId: (oldDb as any).afkChannelId || null,
       };
       // Remove legacy keys
       delete (db as any).blockedTexts;
@@ -84,6 +86,7 @@ function getGuildData(db: DatabaseSchema, guildId: string): GuildDatabaseSchema 
       delete (db as any).spamExemptUsers;
       delete (db as any).tempKicks;
       delete (db as any).tempBans;
+      delete (db as any).afkChannelId;
     } else {
       db[guildId] = {
         blockedTexts: [],
@@ -94,6 +97,7 @@ function getGuildData(db: DatabaseSchema, guildId: string): GuildDatabaseSchema 
         spamExemptUsers: [],
         tempKicks: {},
         tempBans: {},
+        afkChannelId: null,
       };
     }
   }
@@ -287,6 +291,18 @@ export const Database = {
   removeTempBan(guildId: string, userId: string): void {
     const db = readDb();
     delete getGuildData(db, guildId).tempBans[userId];
+    writeDb(db);
+  },
+
+  // --- AFK Lobby configuration ---
+  getAfkChannelId(guildId: string): string | null {
+    const db = readDb();
+    return getGuildData(db, guildId).afkChannelId || null;
+  },
+
+  setAfkChannelId(guildId: string, channelId: string | null): void {
+    const db = readDb();
+    getGuildData(db, guildId).afkChannelId = channelId;
     writeDb(db);
   },
 };

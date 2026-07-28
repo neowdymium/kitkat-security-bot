@@ -19,6 +19,7 @@ import {
   setTicketSupportTarget,
   addArchMember,
   registerTempVc,
+  setGuildAfkChannel,
 } from '../lib/kitkatState.js';
 import { Config } from '../config.js';
 
@@ -90,6 +91,7 @@ export function buildGuildSnapshot(client: Client, guildId: string, scopes: KitK
       tempVcCategoryId: state.config.tempVcCategoryId,
       ticketCategoryId: state.config.ticketCategoryId,
       setnickChannelId: state.config.setnickChannelId,
+      afkChannelId: state.config.afkChannelId,
     };
   }
 
@@ -157,6 +159,9 @@ export function applyGuildSnapshot(client: Client, snapshot: KitKatSnapshotPaylo
     }
     if ('setnickChannelId' in snapshot.config) {
       setSetNickChannel(client, snapshot.guildId, (snapshot.config.setnickChannelId as string | null) ?? null);
+    }
+    if ('afkChannelId' in snapshot.config) {
+      setGuildAfkChannel(client, snapshot.guildId, (snapshot.config.afkChannelId as string | null) ?? null);
     }
   }
 

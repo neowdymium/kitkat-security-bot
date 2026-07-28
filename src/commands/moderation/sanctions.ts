@@ -26,6 +26,7 @@ import {
   sendKitKatAlert,
   sendKitKatLog,
   setSetNickChannel,
+  getGuildLoggingChannelId,
 } from '../../lib/kitkatState.js';
 import { sendDeveloperBackup } from '../../utils/stateSnapshots.js';
 import { Database } from '../../database.js';
@@ -931,4 +932,54 @@ export const SetNickCommand = {
       ephemeral: true,
     });
   },
+};
+
+// ==========================================
+// User Reporting System (/report)
+// ==========================================
+export const ReportCommand = {
+  data: new SlashCommandBuilder()
+    .setName('report')
+    .setDescription('Report a server member to the moderation team.')
+    .addUserOption((opt) => opt.setName('target').setDescription('The user you are reporting').setRequired(true))
+    .addStringOption((opt) => opt.setName('reason').setDescription('Reason description').setRequired(true)),
+  async execute(interaction: ChatInputCommandInteraction) {
+    const targetUser = interaction.options.getUser('target', true);
+    const reason = interaction.options.getString('reason', true);
+    const guildId = interaction.guildId!;
+
+    const loggingChannelId = getGuildLoggingChannelId(interaction.client, guildId);
+    if (!loggingChannelId) {
+      return interaction.reply({
+        content: '❌ **Report Error**: The server reporting system is not configured yet (no logging channel set).',
+        ephemeral: true,
+      });
+    }
+
+    const logEmbed = new EmbedBuilder()
+      .setColor(0xff3333)
+      .setTitle('📁 User Report Received')
+      .addFields(
+        { name: 'Reported User', value: `<@${targetUser.id}> (${targetUser.tag})`, inline: true },
+        { name: 'Reporter', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+        { name: 'Channel', value: `<#${interaction.channelId}>`, inline: true },
+        { name: 'Timestamp', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+        { name: 'Reason', value: reason }
+      )
+      .setTimestamp();
+
+    try {
+      await sendKitKatLog(interaction.client, guildId, { embeds: [logEmbed] });
+      await interaction.reply({
+        content: 'Your report has been submitted to the moderation team.',
+        ephemeral: true,
+      });
+    } catch (error) {
+      console.error('[KitKat Report Error]:', error);
+      await interaction.reply({
+        content: '❌ Failed to submit your report. Please contact an administrator.',
+        ephemeral: true,
+      });
+    }
+  }
 };

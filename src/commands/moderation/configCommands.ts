@@ -8,6 +8,7 @@ import {
   ChannelType,
 } from 'discord.js';
 import { Config } from '../../config.js';
+import { Database } from '../../database.js';
 import {
   addNicknameApprover,
   buildKitKatEmbed,
@@ -23,6 +24,7 @@ import {
   setSetNickChannel,
   setTempVcCategory,
   setTicketCategory,
+  setGuildAfkChannel,
 } from '../../lib/kitkatState.js';
 import { sendDeveloperBackup } from '../../utils/stateSnapshots.js';
 
@@ -118,6 +120,19 @@ export const ConfigCommand = {
             .addUserOption((opt) => opt.setName('user').setDescription('User to revoke').setRequired(true))
             .addStringOption((opt) =>
               opt.setName('guild_id').setDescription('Guild ID to revoke').setRequired(true)
+            )
+        )
+    )
+    .addSubcommandGroup((group) =>
+      group
+        .setName('afk')
+        .setDescription('Configure server AFK settings.')
+        .addSubcommand((sub) =>
+          sub
+            .setName('lobby')
+            .setDescription('Set the server AFK voice channel.')
+            .addChannelOption((opt) =>
+              opt.setName('vc').setDescription('AFK Voice Channel').setRequired(true)
             )
         )
     )
@@ -232,6 +247,21 @@ export const ConfigCommand = {
       }
 
       await sendDeveloperBackup(interaction.client, guildId, ['config', 'perm']);
+      return;
+    }
+
+    if (group === 'afk' && sub === 'lobby') {
+      const channel = interaction.options.getChannel('vc', true);
+      if (!('isVoiceBased' in channel) || !channel.isVoiceBased()) {
+        return interaction.reply({ content: '❌ The AFK lobby channel must be a voice channel.', ephemeral: true });
+      }
+
+      setGuildAfkChannel(interaction.client, interaction.guildId!, channel.id);
+      Database.setAfkChannelId(interaction.guildId!, channel.id);
+      await interaction.reply({
+        content: `✅ **KitKat Config**: Server AFK voice channel set to <#${channel.id}>.`,
+      });
+      await sendDeveloperBackup(interaction.client, interaction.guildId!, ['config']);
       return;
     }
 
@@ -398,17 +428,19 @@ export const HelpCommand = {
             '`/deafen user`, `/deafen all`',
             '`/tempkick`, `/tempban`, `/ban`',
             '`/setnick request`, `/setnick config approval`',
+            '`/report`',
           ].join('\n'),
         },
         {
           name: 'Voice & Guard',
           value: [
             '`/vclock`, `/vcunlock`, `/guard`, `/unguard`, `/whitelist`, `/transfer`',
+            '`/afk`, `/join`, `/leave`',
           ].join('\n'),
         },
         {
           name: 'Temp VC',
-          value: ['`/config tempvc category`', '`/tempvc create`, `/tempvc remove`'].join('\n'),
+          value: ['`/config tempvc category`', '`/tempvc create`, `/tempvc remove`, `/tempvc rename`'].join('\n'),
         },
         {
           name: 'Support & Requests',
@@ -417,7 +449,7 @@ export const HelpCommand = {
         {
           name: 'Admin & Config',
           value: [
-            '`/config logging set`, `/config setnick channel`, `/config setnick approval`',
+            '`/config logging set`, `/config setnick channel`, `/config setnick approval`, `/config afk lobby`',
             '`/config permission ref`, `/config permission revoke`',
             '`/config dm_alerts`, `/perm`, `/blocktext`, `/blocklink`, `/logging start|stop`',
           ].join('\n'),

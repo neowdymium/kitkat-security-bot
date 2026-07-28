@@ -79,6 +79,7 @@ export interface KitKatGuildState {
     tempVcCategoryId: string | null;
     ticketCategoryId: string | null;
     setnickChannelId: string | null;
+    afkChannelId: string | null;
   };
   archUsers: Map<string, KitKatArchRecord>;
   permissions: Map<string, KitKatPermissionGrant>;
@@ -112,6 +113,7 @@ function createDefaultGuildState(): KitKatGuildState {
       tempVcCategoryId: null,
       ticketCategoryId: null,
       setnickChannelId: null,
+      afkChannelId: null,
     },
     archUsers: new Map(),
     permissions: new Map(),
@@ -342,6 +344,14 @@ export function setSetNickChannel(client: Client, guildId: string, channelId: st
 
 export function getSetNickChannel(client: Client, guildId: string): string | null {
   return getGuildState(client, guildId).config.setnickChannelId;
+}
+
+export function setGuildAfkChannel(client: Client, guildId: string, channelId: string | null): void {
+  getGuildState(client, guildId).config.afkChannelId = channelId;
+}
+
+export function getGuildAfkChannelId(client: Client, guildId: string): string | null {
+  return getGuildState(client, guildId).config.afkChannelId;
 }
 
 export function addNicknameApprover(

@@ -1,4 +1,4 @@
-import { Events, Interaction, ButtonInteraction, GuildMember } from 'discord.js';
+import { Events, Interaction, ButtonInteraction, GuildMember, ActionRowBuilder, ButtonBuilder, ComponentType } from 'discord.js';
 import {
   deleteNicknameRequest,
   getNicknameRequest,
@@ -113,18 +113,65 @@ async function handleButtonInteraction(interaction: ButtonInteraction): Promise<
     return;
   }
 
-  await target.setNickname(request.requestedNick, `KitKat nickname approved by ${interaction.user.tag}`).catch(() => {});
-  deleteNicknameRequest(interaction.client, interaction.guildId, requestId);
-
-  const embed = buildKitKatEmbed(
-    '✅ KitKat Nickname Approved',
-    `Nickname request for <@${request.targetId}> was approved by <@${interaction.user.id}>.`,
-    0x00cc66
-  );
-
-  if (interaction.message && 'edit' in interaction.message) {
-    await interaction.message.edit({ embeds: [embed], components: [] }).catch(() => {});
+  let success = true;
+  try {
+    await target.setNickname(request.requestedNick, `KitKat nickname approved by ${interaction.user.tag}`);
+  } catch (error) {
+    console.error('[Nickname Approval Error]:', error);
+    success = false;
   }
 
-  await interaction.reply({ content: `✅ Approved nickname change for <@${request.targetId}>.`, ephemeral: true });
+  deleteNicknameRequest(interaction.client, interaction.guildId, requestId);
+
+  // Disable the button in the action row
+  let row: ActionRowBuilder<ButtonBuilder> | null = null;
+  if (interaction.message && interaction.message.components.length > 0) {
+    row = new ActionRowBuilder<ButtonBuilder>();
+    const originalRow = interaction.message.components[0] as any;
+    originalRow.components.forEach((comp: any) => {
+      if (comp.type === ComponentType.Button) {
+        const btn = ButtonBuilder.from(comp);
+        btn.setDisabled(true);
+        row!.addComponents(btn);
+      }
+    });
+  }
+
+  if (success) {
+    const embed = buildKitKatEmbed(
+      '✅ KitKat Nickname Approved',
+      `Approved & Applied by <@${interaction.user.id}>.\n\n**Member:** <@${request.targetId}>\n**Nickname:** \`${request.requestedNick}\``,
+      0x00cc66
+    );
+
+    if (interaction.message && 'edit' in interaction.message) {
+      await interaction.message.edit({
+        embeds: [embed],
+        components: row ? [row] : [],
+      }).catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `✅ Approved and applied nickname change for <@${request.targetId}>.`,
+      ephemeral: true,
+    });
+  } else {
+    const embed = buildKitKatEmbed(
+      '❌ KitKat Nickname Approval Failed',
+      `Approval Failed (Hierarchy Error).\n\n**Member:** <@${request.targetId}>\n**Nickname:** \`${request.requestedNick}\``,
+      0xff3333
+    );
+
+    if (interaction.message && 'edit' in interaction.message) {
+      await interaction.message.edit({
+        embeds: [embed],
+        components: row ? [row] : [],
+      }).catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `❌ **Hierarchy Error**: KitKat has lower role hierarchy than <@${request.targetId}> and cannot rename them.`,
+      ephemeral: true,
+    });
+  }
 }

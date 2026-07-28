@@ -25,8 +25,10 @@ import {
   scheduleTempVcCleanup,
   setTempVcCategory,
   isGuildArch,
+  getGuildAfkChannelId,
 } from '../../lib/kitkatState.js';
 import { sendKitKatLog } from '../../lib/kitkatState.js';
+import { joinVoiceChannel, getVoiceConnection } from '@discordjs/voice';
 
 function botCanManageChannel(interaction: ChatInputCommandInteraction, channel: VoiceChannel): boolean {
   const bot = interaction.guild?.members.me;
@@ -108,7 +110,7 @@ async function createTempVc(
     return;
   }
 
-  const channelName = `${owner.user.username}'s Temporary VC ${index}`;
+  const channelName = `${owner.user.username}'s Temporary VC`;
   const channel = await interaction.guild!.channels.create({
     name: channelName,
     type: ChannelType.GuildVoice,
@@ -216,6 +218,11 @@ export const VcLockCommand = {
 
       await voiceChannel.permissionOverwrites.edit(interaction.user.id, { Connect: true }).catch(() => {});
 
+      // 3. Update voice channel status via Discord API REST endpoint
+      await interaction.client.rest.put(`/channels/${voiceChannel.id}/voice-status`, {
+        body: { status: '🔒 This Channel is Locked by KitKat' },
+      }).catch((err) => console.error('[Voice Status Error]: Failed to set locked status:', err));
+
       for (const targetId of getAllowedLockTargets(interaction)) {
         await voiceChannel.permissionOverwrites.edit(targetId, { Connect: true }).catch(() => {});
       }
@@ -286,6 +293,11 @@ export const VcUnlockCommand = {
       state.lockedChannels.delete(voiceChannel.id);
       state.whitelists.delete(voiceChannel.id);
 
+      // 3. Clear voice channel status via Discord API REST endpoint
+      await interaction.client.rest.put(`/channels/${voiceChannel.id}/voice-status`, {
+        body: { status: '' },
+      }).catch((err) => console.error('[Voice Status Error]: Failed to clear status:', err));
+
       const embed = buildKitKatEmbed(
         '🔓 KitKat Voice Lock Removed',
         `Unlocked **${voiceChannel.name}** and cleared temporary connect overrides.`,
@@ -346,6 +358,11 @@ export const GuardCommand = {
 
     state.guardedChannels.set(voiceChannel.id, interaction.user.id);
 
+    // Update voice channel status via Discord API REST endpoint
+    await interaction.client.rest.put(`/channels/${voiceChannel.id}/voice-status`, {
+      body: { status: '🛡️ This Channel is Guarded by KitKat' },
+    }).catch((err) => console.error('[Voice Status Error]: Failed to set guarded status:', err));
+
     const embed = buildKitKatEmbed(
       '🛡️ KitKat Guard Enabled',
       `Privacy lockdown is active in **${voiceChannel.name}**.`,
@@ -402,6 +419,11 @@ export const UnguardCommand = {
     }
 
     state.guardedChannels.delete(voiceChannel.id);
+
+    // Clear voice channel status via Discord API REST endpoint
+    await interaction.client.rest.put(`/channels/${voiceChannel.id}/voice-status`, {
+      body: { status: '' },
+    }).catch((err) => console.error('[Voice Status Error]: Failed to clear status:', err));
 
     const embed = buildKitKatEmbed(
       '🛡️ KitKat Guard Disabled',
@@ -562,6 +584,12 @@ export const TempVcCommand = {
         )
     )
     .addSubcommand((sub) =>
+      sub
+        .setName('rename')
+        .setDescription('Rename your temporary voice channel.')
+        .addStringOption((opt) => opt.setName('vc_name').setDescription('New name for your temporary VC').setRequired(true))
+    )
+    .addSubcommand((sub) =>
       sub.setName('create').setDescription('Create a temporary voice channel.')
     )
     .addSubcommand((sub) =>
@@ -605,6 +633,47 @@ export const TempVcCommand = {
       }
 
       await createTempVc(interaction, member, categoryId);
+      return;
+    }
+
+    if (sub === 'rename') {
+      const newName = interaction.options.getString('vc_name', true);
+      const voiceChannel = getMemberChannel(member);
+
+      if (!voiceChannel) {
+        return interaction.reply({
+          content: '❌ You must be connected to a temporary voice channel to rename it.',
+          ephemeral: true,
+        });
+      }
+
+      const record = getTempVcRecord(interaction.client, interaction.guildId!, voiceChannel.id);
+      if (!record || record.ownerId !== member.id) {
+        return interaction.reply({
+          content: '❌ You can only rename a temporary voice channel that you created, and you must be inside it.',
+          ephemeral: true,
+        });
+      }
+
+      if (!botCanManageChannel(interaction, voiceChannel)) {
+        return interaction.reply({
+          content: '❌ KitKat lacks permission to manage (rename) this channel.',
+          ephemeral: true,
+        });
+      }
+
+      try {
+        await voiceChannel.setName(newName);
+        await interaction.reply({
+          content: `✅ **KitKat TempVC**: Renamed your voice channel to **${newName}**.`,
+        });
+      } catch (error) {
+        console.error('[KitKat TempVC Rename Error]:', error);
+        await interaction.reply({
+          content: '❌ Failed to rename the voice channel.',
+          ephemeral: true,
+        });
+      }
       return;
     }
 
@@ -656,4 +725,181 @@ export const TransferCommand = {
       await interaction.reply({ content: '❌ Failed to transfer the member.', ephemeral: true });
     }
   },
+};
+
+// ==========================================
+// 8. /afk Command (AFK Voice Relocation)
+// ==========================================
+export const AfkCommand = {
+  data: new SlashCommandBuilder()
+    .setName('afk')
+    .setDescription('Moves a target member to the configured AFK voice channel.')
+    .addUserOption((opt) => opt.setName('target').setDescription('The member to move to AFK').setRequired(true)),
+  async execute(interaction: ChatInputCommandInteraction) {
+    const executor = interaction.member as GuildMember;
+    const targetUser = interaction.options.getUser('target', true);
+    const guildId = interaction.guildId!;
+
+    // Check custom permissions (executor must have INTERNAL afk scope or ARCH access)
+    if (!canUseKitKatRestrictedCommand(executor, 'afk')) {
+      return interaction.reply({
+        content: '❌ **Access Denied**: You require ARCH privileges or bot internal "afk" scope to use this command.',
+        ephemeral: true,
+      });
+    }
+
+    const afkChannelId = getGuildAfkChannelId(interaction.client, guildId);
+    if (!afkChannelId) {
+      return interaction.reply({
+        content: '❌ **Configuration Error**: No AFK lobby has been configured. Configure one using `/config afk lobby vc:#voice_channel`.',
+        ephemeral: true,
+      });
+    }
+
+    const guild = interaction.guild!;
+    const targetMember = await guild.members.fetch(targetUser.id).catch(() => null);
+    if (!targetMember) {
+      return interaction.reply({
+        content: '❌ Target member not found in this guild.',
+        ephemeral: true,
+      });
+    }
+
+    if (!targetMember.voice.channel) {
+      return interaction.reply({
+        content: '❌ **Target Voice Error**: The target user is not connected to any voice channel.',
+        ephemeral: true,
+      });
+    }
+
+    const afkChannel = guild.channels.cache.get(afkChannelId);
+    if (!afkChannel || !afkChannel.isVoiceBased()) {
+      return interaction.reply({
+        content: '❌ **Target Voice Error**: The configured AFK lobby channel is invalid or no longer exists.',
+        ephemeral: true,
+      });
+    }
+
+    const bot = guild.members.me;
+    if (bot && !bot.permissions.has(PermissionFlagsBits.MoveMembers)) {
+      return interaction.reply({
+        content: '❌ **Bot Permission Error**: KitKat requires "Move Members" permission to relocate users.',
+        ephemeral: true,
+      });
+    }
+
+    try {
+      await targetMember.voice.setChannel(afkChannel as VoiceChannel);
+      await interaction.reply({
+        content: `💤 **KitKat AFK**: Relocated **${targetMember.user.tag}** to the AFK voice lobby (<#${afkChannelId}>).`,
+      });
+    } catch (error) {
+      console.error('[KitKat AFK Relocation Error]:', error);
+      await interaction.reply({
+        content: '❌ Failed to move target user to the AFK voice channel.',
+        ephemeral: true,
+      });
+    }
+  }
+};
+
+// ==========================================
+// 9. /join & /leave Commands (Developer Silent Presence)
+// ==========================================
+export const JoinCommand = {
+  data: new SlashCommandBuilder()
+    .setName('join')
+    .setDescription('Dev-only: Connect the bot silently to a voice channel.')
+    .addChannelOption((opt) =>
+      opt.setName('channel').setDescription('Voice channel to join').setRequired(false)
+    ),
+  async execute(interaction: ChatInputCommandInteraction) {
+    if (interaction.user.id !== process.env.DEV_ID) {
+      return interaction.reply({
+        content: '❌ **Access Denied**: This command is restricted to the bot developer only.',
+        ephemeral: true,
+      });
+    }
+
+    const guild = interaction.guild!;
+    const devMember = await guild.members.fetch(interaction.user.id).catch(() => null);
+    let targetChannel = interaction.options.getChannel('channel') as VoiceChannel | null;
+
+    if (!targetChannel) {
+      if (devMember && devMember.voice.channel) {
+        targetChannel = devMember.voice.channel as VoiceChannel;
+      }
+    }
+
+    if (!targetChannel) {
+      return interaction.reply({
+        content: '❌ **Join Error**: Please specify a voice channel or join one yourself so I can follow you.',
+        ephemeral: true,
+      });
+    }
+
+    if (!targetChannel.isVoiceBased()) {
+      return interaction.reply({
+        content: '❌ **Join Error**: The target channel must be voice-based.',
+        ephemeral: true,
+      });
+    }
+
+    try {
+      joinVoiceChannel({
+        channelId: targetChannel.id,
+        guildId: guild.id,
+        adapterCreator: guild.voiceAdapterCreator,
+        selfMute: true,
+        selfDeaf: true,
+      });
+
+      await interaction.reply({
+        content: `🔊 **Developer Connection**: Joined <#${targetChannel.id}> in silent mode.`,
+      });
+    } catch (error) {
+      console.error('[KitKat Dev Join Error]:', error);
+      await interaction.reply({
+        content: '❌ Failed to connect to the voice channel.',
+        ephemeral: true,
+      });
+    }
+  }
+};
+
+export const LeaveCommand = {
+  data: new SlashCommandBuilder()
+    .setName('leave')
+    .setDescription('Dev-only: Disconnect the bot from any active voice channel.'),
+  async execute(interaction: ChatInputCommandInteraction) {
+    if (interaction.user.id !== process.env.DEV_ID) {
+      return interaction.reply({
+        content: '❌ **Access Denied**: This command is restricted to the bot developer only.',
+        ephemeral: true,
+      });
+    }
+
+    const guildId = interaction.guildId!;
+    const connection = getVoiceConnection(guildId);
+
+    if (!connection) {
+      return interaction.reply({
+        content: '❌ **Leave Error**: I am not currently connected to any voice channel in this server.',
+        ephemeral: true,
+      });
+    }
+
+    try {
+      connection.destroy();
+      await interaction.reply({
+        content: '🔊 **Developer Connection**: Disconnected and left the voice channel.',
+      });
+    } catch (error) {
+      console.error('[KitKat Dev Leave Error]:', error);
+      await interaction.reply({
+        content: '❌ Failed to disconnect from the voice channel.',
+        ephemeral: true,
+      });
+    }
+  }
 };

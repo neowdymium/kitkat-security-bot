@@ -6,6 +6,7 @@ import {
   scheduleTempVcCleanup,
   cancelTempVcCleanup,
   getTempVcRecord,
+  deleteTempVcRecord,
 } from '../lib/kitkatState.js';
 
 async function sendTemporaryChannelNotice(channel: VoiceChannel | null, content: string): Promise<void> {
@@ -86,7 +87,8 @@ export default {
     if (leftChannel && leftChannel.id !== joinedChannel?.id) {
       const tempVcRecord = getTempVcRecord(member.client, guildId, leftChannel.id);
       if (tempVcRecord && leftChannel.members.size === 0) {
-        scheduleTempVcCleanup(member.client, guildId, leftChannel);
+        deleteTempVcRecord(member.client, guildId, leftChannel.id);
+        await leftChannel.delete('KitKat removed empty temporary voice channel instantly').catch(() => {});
       }
     }
   },
