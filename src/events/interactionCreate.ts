@@ -6,6 +6,10 @@ import {
 } from '../lib/kitkatState.js';
 import { buildKitKatEmbed } from '../lib/kitkatState.js';
 
+// Cooldown cache to rate-limit slash commands globally (2s duration per user/command combo)
+const commandCooldowns = new Map<string, number>();
+const COOLDOWN_DURATION_MS = 2000;
+
 /**
  * Handles incoming interactions from the Discord Gateway.
  * Dispatches slash commands and leaves fine-grained permission checks to the commands themselves.
@@ -21,6 +25,15 @@ export default {
 
     if (!interaction.isChatInputCommand()) return;
 
+    // 1. Dispatcher Guild-only Pre-flight Guard
+    if (!interaction.guildId || !interaction.guild) {
+      await interaction.reply({
+        content: '❌ **Access Denied**: KitKat slash commands can only be executed within a Discord server (guild).',
+        ephemeral: true,
+      });
+      return;
+    }
+
     const { client, commandName, user, guild } = interaction;
     const command = client.commands.get(commandName);
 
@@ -29,8 +42,22 @@ export default {
       return;
     }
 
+    // 2. Command Rate-limiting / Cooldown Check
+    const cooldownKey = `${user.id}:${commandName}`;
+    const now = Date.now();
+    const expiration = commandCooldowns.get(cooldownKey);
+    if (expiration && now < expiration) {
+      const secondsLeft = ((expiration - now) / 1000).toFixed(1);
+      await interaction.reply({
+        content: `⏱️ **Cooldown Active**: Please wait **${secondsLeft}s** before calling \`/${commandName}\` again.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    commandCooldowns.set(cooldownKey, now + COOLDOWN_DURATION_MS);
+
     try {
-      console.log(`[KitKat Interaction]: Running /${commandName} for ${user.tag} (${user.id})`);
+      console.log(`[KitKat Interaction]: Running /${commandName} for ${user.tag} (${user.id}) in guild ${interaction.guildId}`);
       await command.execute(interaction);
     } catch (error) {
       console.error(`[Execution Error]: Failed to execute /${commandName}:`, error);

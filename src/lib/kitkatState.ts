@@ -359,12 +359,12 @@ export function removeNicknameApprover(client: Client, guildId: string, targetId
 
 export function isNicknameApprover(member: GuildMember): boolean {
   const state = getGuildState(member.client, member.guild.id);
-  if (state.nicknameApprovers.has(member.id) && state.nicknameApprovers.get(member.id) === 'user') {
+  if (state.nicknameApprovers.has(member.id)) {
     return true;
   }
 
   for (const role of member.roles.cache.values()) {
-    if (state.nicknameApprovers.get(role.id) === 'role') {
+    if (state.nicknameApprovers.has(role.id)) {
       return true;
     }
   }

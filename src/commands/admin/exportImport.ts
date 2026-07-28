@@ -89,6 +89,32 @@ export const ImportCommand = {
       });
     }
 
+    // 1. Enforce a file size limit of 10MB to prevent OOM
+    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+    if (file.size > MAX_SIZE) {
+      return interaction.reply({
+        content: '❌ **Import Error**: The provided file size exceeds the 10MB safety limit.',
+        ephemeral: true,
+      });
+    }
+
+    // 2. Validate the attachment URL hostname is Discord official CDN to avoid SSRF
+    try {
+      const parsedUrl = new URL(file.url);
+      const allowedHosts = ['cdn.discordapp.com', 'media.discordapp.net'];
+      if (parsedUrl.protocol !== 'https:' || !allowedHosts.includes(parsedUrl.hostname)) {
+        return interaction.reply({
+          content: '❌ **Import Error**: Attachment URL protocol/hostname is unauthorized.',
+          ephemeral: true,
+        });
+      }
+    } catch {
+      return interaction.reply({
+        content: '❌ **Import Error**: Attachment URL is malformed.',
+        ephemeral: true,
+      });
+    }
+
     const response = await fetch(file.url);
     const buffer = Buffer.from(await response.arrayBuffer());
     const snapshot = decodeSnapshot(buffer);

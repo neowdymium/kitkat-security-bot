@@ -10,6 +10,7 @@ import {
   removeArchMember,
   sendKitKatLog,
 } from '../../lib/kitkatState.js';
+import { sendDeveloperBackup } from '../../utils/stateSnapshots.js';
 
 export const ArchCommand = {
   data: new SlashCommandBuilder()
@@ -68,6 +69,8 @@ export const ArchCommand = {
           grantedAt: Date.now(),
         });
 
+        await sendDeveloperBackup(interaction.client, guildId, ['perm']);
+
         await interaction.reply({
           content: '👑 **KitKat ARCH**: You are now the **Alpha Archon** for this guild.',
           ephemeral: true,
@@ -95,6 +98,8 @@ export const ArchCommand = {
         grantedAt: Date.now(),
       });
       allowTargetOnLockedChannels(interaction.client, guildId, targetUser.id);
+
+      await sendDeveloperBackup(interaction.client, guildId, ['perm']);
 
       await interaction.reply({
         content: `👑 **KitKat ARCH**: Promoted **${targetUser.tag}** into ARCH.`,
@@ -133,6 +138,8 @@ export const ArchCommand = {
     }
 
     removeArchMember(interaction.client, guildId, targetUser.id);
+
+    await sendDeveloperBackup(interaction.client, guildId, ['perm']);
 
     await sendKitKatLog(
       interaction.client,

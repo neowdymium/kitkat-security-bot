@@ -28,6 +28,7 @@ import {
   setSetNickChannel,
 } from '../../lib/kitkatState.js';
 import { sendDeveloperBackup } from '../../utils/stateSnapshots.js';
+import { Database } from '../../database.js';
 
 function canModerateWithScope(member: GuildMember, scope: string, permission: bigint): boolean {
   return member.permissions.has(permission) || memberHasGuildScope(member, scope);
@@ -244,16 +245,19 @@ export const TempKickCommand = {
         await target.voice.disconnect('KitKat temporary voice kick');
       }
 
-      state.tempKicks.set(target.id, {
+      const kickRecord = {
         expiresAt,
         moderatorId: interaction.user.id,
         reason: `Temp-kick by KitKat for ${durationInput}`,
-      });
+      };
+      state.tempKicks.set(target.id, kickRecord);
+      Database.addTempKick(interaction.guildId!, target.id, kickRecord);
 
       setTimeout(() => {
         const record = state.tempKicks.get(target.id);
         if (record && record.expiresAt === expiresAt) {
           state.tempKicks.delete(target.id);
+          Database.removeTempKick(interaction.guildId!, target.id);
         }
       }, duration);
 
@@ -392,6 +396,7 @@ export const MuteCommand = {
 
       const state = getGuildState(interaction.client, interaction.guildId!);
       state.tempKicks.delete(target.id);
+      Database.removeTempKick(interaction.guildId!, target.id);
 
       await dispatchModerationAlert(
         interaction,
@@ -601,11 +606,13 @@ export const TempBanCommand = {
 
     try {
       await interaction.guild!.members.ban(targetUser.id, { reason });
-      state.tempBans.set(targetUser.id, {
+      const banRecord = {
         expiresAt,
         moderatorId: interaction.user.id,
         reason,
-      });
+      };
+      state.tempBans.set(targetUser.id, banRecord);
+      Database.addTempBan(interaction.guildId!, targetUser.id, banRecord);
 
       setTimeout(async () => {
         const record = state.tempBans.get(targetUser.id);
@@ -619,6 +626,7 @@ export const TempBanCommand = {
           console.error('[KitKat TempBan Unban Error]:', error);
         } finally {
           state.tempBans.delete(targetUser.id);
+          Database.removeTempBan(interaction.guildId!, targetUser.id);
         }
       }, duration);
 
