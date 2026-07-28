@@ -2,7 +2,7 @@ import { Message, GuildMember, EmbedBuilder, Client } from 'discord.js';
 import { Database } from '../database.js';
 import { Config } from '../config.js';
 import { Pipeline } from './pipeline.js';
-import { isGuildDmAlertsEnabled, sendKitKatLog } from '../lib/kitkatState.js';
+import { isGuildDmAlertsEnabled, sendKitKatLog, isGuildArch, isGuildOwner } from '../lib/kitkatState.js';
 
 // Unified helper to send audit logs to the configured log channel
 export async function sendAuditLog(client: Client, guildId: string, payload: { embeds: EmbedBuilder[] } | string): Promise<void> {
@@ -21,28 +21,38 @@ interface MessageContext {
 }
 
 // Cache for Anti-Raid (duplicate detection across server)
-// Holds message details from the last 5 seconds
-let globalMessageCache: {
+// Key: guildId -> value: message details from the last 5 seconds
+const guildMessageCache = new Map<string, {
   content: string;
   authorId: string;
   timestamp: number;
   message: Message;
-}[] = [];
+}[]>();
 
 // Cache for single-user Anti-Spam
-const userMessageCache = new Map<string, number[]>();
+// Key: guildId -> (userId -> timestamps)
+const guildUserSpamCache = new Map<string, Map<string, number[]>>();
 
 // ==========================================
 // 1. SPAM EXEMPTION MIDDLEWARE
 // ==========================================
 const SpamExemptionMiddleware = async (ctx: MessageContext, next: () => Promise<void>) => {
-  const { message } = ctx;
+  const { message, client } = ctx;
   const authorId = message.author.id;
+  const guildId = message.guild!.id;
 
-  // Check if the author is added to the spam exemption list
-  if (Database.isSpamExempt(authorId)) {
+  const isArch = isGuildArch(client, guildId, authorId);
+  const isOwner = isGuildOwner(message.member!);
+
+  // ARCH and Owners completely bypass the entire automod pipeline
+  if (isArch || isOwner) {
+    console.log(`[Pipeline]: Bypassed entire automod pipeline for ARCH/Owner: ${message.author.tag}`);
+    return;
+  }
+
+  // Spam-exempt users bypass only Spam and Raid filters, but still go through WordFilter
+  if (Database.isSpamExempt(guildId, authorId)) {
     console.log(`[Pipeline]: Bypassed Spam/Raid check for exempt user/bot: ${message.author.tag}`);
-    // Skip to next check (WordFilter) directly, bypassing Spam & Raid filters
     return WordFilterMiddleware(ctx, next);
   }
   await next();
@@ -55,6 +65,13 @@ const AntiSpamMiddleware = async (ctx: MessageContext, next: () => Promise<void>
   const { message } = ctx;
   const { author, member, channel } = message;
   const now = Date.now();
+  const guildId = message.guild!.id;
+
+  let userMessageCache = guildUserSpamCache.get(guildId);
+  if (!userMessageCache) {
+    userMessageCache = new Map<string, number[]>();
+    guildUserSpamCache.set(guildId, userMessageCache);
+  }
 
   const userTimestamps = userMessageCache.get(author.id) || [];
   // Keep only timestamps within the rolling window (e.g. 3 seconds)
@@ -113,13 +130,16 @@ const AntiRaidMiddleware = async (ctx: MessageContext, next: () => Promise<void>
   const { message } = ctx;
   const now = Date.now();
   const contentKey = message.content.trim().toLowerCase();
+  const guildId = message.guild!.id;
 
   // Ignore empty messages (e.g. only embeds or files)
   if (!contentKey) {
     return next();
   }
 
-  // Push new message metadata to global cache
+  let globalMessageCache = guildMessageCache.get(guildId) || [];
+
+  // Push new message metadata to cache
   globalMessageCache.push({
     content: contentKey,
     authorId: message.author.id,
@@ -129,6 +149,7 @@ const AntiRaidMiddleware = async (ctx: MessageContext, next: () => Promise<void>
 
   // Prune entries older than 5 seconds
   globalMessageCache = globalMessageCache.filter(m => now - m.timestamp < 5000);
+  guildMessageCache.set(guildId, globalMessageCache);
 
   // Find duplicates of the current message content
   const duplicates = globalMessageCache.filter(m => m.content === contentKey);
@@ -138,6 +159,7 @@ const AntiRaidMiddleware = async (ctx: MessageContext, next: () => Promise<void>
     
     // Evict duplicate keys from cache to prevent multiple fires
     globalMessageCache = globalMessageCache.filter(m => m.content !== contentKey);
+    guildMessageCache.set(guildId, globalMessageCache);
 
     const offendingUserIds = Array.from(new Set(duplicates.map(d => d.authorId)));
     console.log(`[Anti-Raid]: Raid detected! Duplicate content: "${contentKey}". Offending users: ${offendingUserIds.join(', ')}`);
@@ -152,7 +174,7 @@ const AntiRaidMiddleware = async (ctx: MessageContext, next: () => Promise<void>
 
       // 2. Apply timeout sanctions to all involved users (unless exempt)
       for (const userId of offendingUserIds) {
-        if (Database.isSpamExempt(userId)) continue;
+        if (Database.isSpamExempt(guildId, userId)) continue;
 
         const guildMember = await message.guild!.members.fetch(userId).catch(() => null);
         if (guildMember && guildMember.moderatable) {
@@ -190,9 +212,10 @@ const WordFilterMiddleware = async (ctx: MessageContext, next: () => Promise<voi
   const { message } = ctx;
   const { content, author, channel } = message;
   const cleanContent = content.toLowerCase();
+  const guildId = message.guild!.id;
 
-  const blockedTexts = Database.getBlockedTexts();
-  const blockedLinks = Database.getBlockedLinks();
+  const blockedTexts = Database.getBlockedTexts(guildId);
+  const blockedLinks = Database.getBlockedLinks(guildId);
 
   let flaggedPhrase: string | null = null;
   let isLink = false;

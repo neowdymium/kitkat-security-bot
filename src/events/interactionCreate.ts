@@ -1,10 +1,14 @@
-import { Events, Interaction, ButtonInteraction, GuildMember } from 'discord.js';
+import { Events, Interaction, ButtonInteraction, GuildMember, ActionRowBuilder, ButtonBuilder, ComponentType } from 'discord.js';
 import {
   deleteNicknameRequest,
   getNicknameRequest,
   isNicknameApprover,
 } from '../lib/kitkatState.js';
 import { buildKitKatEmbed } from '../lib/kitkatState.js';
+
+// Cooldown cache to rate-limit slash commands globally (2s duration per user/command combo)
+const commandCooldowns = new Map<string, number>();
+const COOLDOWN_DURATION_MS = 2000;
 
 /**
  * Handles incoming interactions from the Discord Gateway.
@@ -21,6 +25,15 @@ export default {
 
     if (!interaction.isChatInputCommand()) return;
 
+    // 1. Dispatcher Guild-only Pre-flight Guard
+    if (!interaction.guildId || !interaction.guild) {
+      await interaction.reply({
+        content: '❌ **Access Denied**: KitKat slash commands can only be executed within a Discord server (guild).',
+        ephemeral: true,
+      });
+      return;
+    }
+
     const { client, commandName, user, guild } = interaction;
     const command = client.commands.get(commandName);
 
@@ -29,8 +42,22 @@ export default {
       return;
     }
 
+    // 2. Command Rate-limiting / Cooldown Check
+    const cooldownKey = `${user.id}:${commandName}`;
+    const now = Date.now();
+    const expiration = commandCooldowns.get(cooldownKey);
+    if (expiration && now < expiration) {
+      const secondsLeft = ((expiration - now) / 1000).toFixed(1);
+      await interaction.reply({
+        content: `⏱️ **Cooldown Active**: Please wait **${secondsLeft}s** before calling \`/${commandName}\` again.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    commandCooldowns.set(cooldownKey, now + COOLDOWN_DURATION_MS);
+
     try {
-      console.log(`[KitKat Interaction]: Running /${commandName} for ${user.tag} (${user.id})`);
+      console.log(`[KitKat Interaction]: Running /${commandName} for ${user.tag} (${user.id}) in guild ${interaction.guildId}`);
       await command.execute(interaction);
     } catch (error) {
       console.error(`[Execution Error]: Failed to execute /${commandName}:`, error);
@@ -86,18 +113,65 @@ async function handleButtonInteraction(interaction: ButtonInteraction): Promise<
     return;
   }
 
-  await target.setNickname(request.requestedNick, `KitKat nickname approved by ${interaction.user.tag}`).catch(() => {});
-  deleteNicknameRequest(interaction.client, interaction.guildId, requestId);
-
-  const embed = buildKitKatEmbed(
-    '✅ KitKat Nickname Approved',
-    `Nickname request for <@${request.targetId}> was approved by <@${interaction.user.id}>.`,
-    0x00cc66
-  );
-
-  if (interaction.message && 'edit' in interaction.message) {
-    await interaction.message.edit({ embeds: [embed], components: [] }).catch(() => {});
+  let success = true;
+  try {
+    await target.setNickname(request.requestedNick, `KitKat nickname approved by ${interaction.user.tag}`);
+  } catch (error) {
+    console.error('[Nickname Approval Error]:', error);
+    success = false;
   }
 
-  await interaction.reply({ content: `✅ Approved nickname change for <@${request.targetId}>.`, ephemeral: true });
+  deleteNicknameRequest(interaction.client, interaction.guildId, requestId);
+
+  // Disable the button in the action row
+  let row: ActionRowBuilder<ButtonBuilder> | null = null;
+  if (interaction.message && interaction.message.components.length > 0) {
+    row = new ActionRowBuilder<ButtonBuilder>();
+    const originalRow = interaction.message.components[0] as any;
+    originalRow.components.forEach((comp: any) => {
+      if (comp.type === ComponentType.Button) {
+        const btn = ButtonBuilder.from(comp);
+        btn.setDisabled(true);
+        row!.addComponents(btn);
+      }
+    });
+  }
+
+  if (success) {
+    const embed = buildKitKatEmbed(
+      '✅ KitKat Nickname Approved',
+      `Approved & Applied by <@${interaction.user.id}>.\n\n**Member:** <@${request.targetId}>\n**Nickname:** \`${request.requestedNick}\``,
+      0x00cc66
+    );
+
+    if (interaction.message && 'edit' in interaction.message) {
+      await interaction.message.edit({
+        embeds: [embed],
+        components: row ? [row] : [],
+      }).catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `✅ Approved and applied nickname change for <@${request.targetId}>.`,
+      ephemeral: true,
+    });
+  } else {
+    const embed = buildKitKatEmbed(
+      '❌ KitKat Nickname Approval Failed',
+      `Approval Failed (Hierarchy Error).\n\n**Member:** <@${request.targetId}>\n**Nickname:** \`${request.requestedNick}\``,
+      0xff3333
+    );
+
+    if (interaction.message && 'edit' in interaction.message) {
+      await interaction.message.edit({
+        embeds: [embed],
+        components: row ? [row] : [],
+      }).catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `❌ **Hierarchy Error**: KitKat has lower role hierarchy than <@${request.targetId}> and cannot rename them.`,
+      ephemeral: true,
+    });
+  }
 }

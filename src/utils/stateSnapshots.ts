@@ -19,6 +19,7 @@ import {
   setTicketSupportTarget,
   addArchMember,
   registerTempVc,
+  setGuildAfkChannel,
 } from '../lib/kitkatState.js';
 import { Config } from '../config.js';
 
@@ -75,12 +76,12 @@ export function buildGuildSnapshot(client: Client, guildId: string, scopes: KitK
 
   if (expandedScopes.includes('words')) {
     payload.database = payload.database || { blockedTexts: [], blockedLinks: [] };
-    payload.database.blockedTexts = Database.getBlockedTexts();
+    payload.database.blockedTexts = Database.getBlockedTexts(guildId);
   }
 
   if (expandedScopes.includes('links')) {
     payload.database = payload.database || { blockedTexts: [], blockedLinks: [] };
-    payload.database.blockedLinks = Database.getBlockedLinks();
+    payload.database.blockedLinks = Database.getBlockedLinks(guildId);
   }
 
   if (expandedScopes.includes('config')) {
@@ -90,6 +91,7 @@ export function buildGuildSnapshot(client: Client, guildId: string, scopes: KitK
       tempVcCategoryId: state.config.tempVcCategoryId,
       ticketCategoryId: state.config.ticketCategoryId,
       setnickChannelId: state.config.setnickChannelId,
+      afkChannelId: state.config.afkChannelId,
     };
   }
 
@@ -135,11 +137,11 @@ export function applyGuildSnapshot(client: Client, snapshot: KitKatSnapshotPaylo
   const state = getGuildState(client, snapshot.guildId);
 
   if (snapshot.database?.blockedTexts) {
-    Database.replaceBlockedTexts(snapshot.database.blockedTexts);
+    Database.replaceBlockedTexts(snapshot.guildId, snapshot.database.blockedTexts);
   }
 
   if (snapshot.database?.blockedLinks) {
-    Database.replaceBlockedLinks(snapshot.database.blockedLinks);
+    Database.replaceBlockedLinks(snapshot.guildId, snapshot.database.blockedLinks);
   }
 
   if (snapshot.config) {
@@ -157,6 +159,9 @@ export function applyGuildSnapshot(client: Client, snapshot: KitKatSnapshotPaylo
     }
     if ('setnickChannelId' in snapshot.config) {
       setSetNickChannel(client, snapshot.guildId, (snapshot.config.setnickChannelId as string | null) ?? null);
+    }
+    if ('afkChannelId' in snapshot.config) {
+      setGuildAfkChannel(client, snapshot.guildId, (snapshot.config.afkChannelId as string | null) ?? null);
     }
   }
 
@@ -212,7 +217,22 @@ export function encodeSnapshot(snapshot: KitKatSnapshotPayload, format: KitKatEx
 }
 
 export function decodeSnapshot(buffer: Buffer): KitKatSnapshotPayload {
-  const content = buffer[0] === 0x1f && buffer[1] === 0x8b ? zlib.gunzipSync(buffer).toString('utf8') : buffer.toString('utf8');
+  const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+  if (buffer.length > MAX_SIZE) {
+    throw new Error('Snapshot file size exceeds the 10MB safety limit.');
+  }
+
+  let content: string;
+  if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
+    const decompressed = zlib.gunzipSync(buffer);
+    if (decompressed.length > MAX_SIZE) {
+      throw new Error('Decompressed snapshot content exceeds the 10MB safety limit.');
+    }
+    content = decompressed.toString('utf8');
+  } else {
+    content = buffer.toString('utf8');
+  }
+
   const parsed = JSON.parse(content) as KitKatSnapshotPayload;
   if (parsed.schema !== 'kitkat.snapshot.v1') {
     throw new Error('Unsupported snapshot schema.');

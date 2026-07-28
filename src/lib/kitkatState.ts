@@ -79,6 +79,7 @@ export interface KitKatGuildState {
     tempVcCategoryId: string | null;
     ticketCategoryId: string | null;
     setnickChannelId: string | null;
+    afkChannelId: string | null;
   };
   archUsers: Map<string, KitKatArchRecord>;
   permissions: Map<string, KitKatPermissionGrant>;
@@ -112,6 +113,7 @@ function createDefaultGuildState(): KitKatGuildState {
       tempVcCategoryId: null,
       ticketCategoryId: null,
       setnickChannelId: null,
+      afkChannelId: null,
     },
     archUsers: new Map(),
     permissions: new Map(),
@@ -344,6 +346,14 @@ export function getSetNickChannel(client: Client, guildId: string): string | nul
   return getGuildState(client, guildId).config.setnickChannelId;
 }
 
+export function setGuildAfkChannel(client: Client, guildId: string, channelId: string | null): void {
+  getGuildState(client, guildId).config.afkChannelId = channelId;
+}
+
+export function getGuildAfkChannelId(client: Client, guildId: string): string | null {
+  return getGuildState(client, guildId).config.afkChannelId;
+}
+
 export function addNicknameApprover(
   client: Client,
   guildId: string,
@@ -359,12 +369,12 @@ export function removeNicknameApprover(client: Client, guildId: string, targetId
 
 export function isNicknameApprover(member: GuildMember): boolean {
   const state = getGuildState(member.client, member.guild.id);
-  if (state.nicknameApprovers.has(member.id) && state.nicknameApprovers.get(member.id) === 'user') {
+  if (state.nicknameApprovers.has(member.id)) {
     return true;
   }
 
   for (const role of member.roles.cache.values()) {
-    if (state.nicknameApprovers.get(role.id) === 'role') {
+    if (state.nicknameApprovers.has(role.id)) {
       return true;
     }
   }

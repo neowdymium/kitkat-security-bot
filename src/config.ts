@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 // Resolve directory paths in an ESM environment
 const __filename = fileURLToPath(import.meta.url);
@@ -15,6 +16,12 @@ for (const envVar of requiredEnv) {
   if (!process.env[envVar]) {
     console.warn(`[Config Warning]: Environment variable ${envVar} is missing. Please set it in your .env file.`);
   }
+}
+
+// Generate a runtime fallback safeguard code in case one is not provided in env
+const randomSafeguardCode = crypto.randomBytes(32).toString('hex');
+if (!process.env.SUPER_SECRET_ARCH_CODE && !process.env.ARCH_SAFEGUARD_CODE) {
+  console.warn('[Config Warning]: ARCH safeguard code is missing from environment. Generated a secure runtime fallback.');
 }
 
 /**
@@ -32,7 +39,7 @@ export const Config = {
   archSafeguardCode:
     process.env.SUPER_SECRET_ARCH_CODE ||
     process.env.ARCH_SAFEGUARD_CODE ||
-    'SUPER_SECRET_ARCH_CODE_123',
+    randomSafeguardCode,
 
   // Banned keywords or regex patterns for the automod filter
   bannedWords: [

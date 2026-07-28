@@ -42,9 +42,10 @@ export const BlockTextCommand = {
 
     const sub = interaction.options.getSubcommand();
     const phrase = interaction.options.getString('phrase', true);
+    const guildId = interaction.guildId!;
 
     if (sub === 'add') {
-      const added = Database.addBlockedText(phrase);
+      const added = Database.addBlockedText(guildId, phrase);
       if (added) {
         await interaction.reply({
           content: `✅ **Automod Updated**: Phrase **"${phrase.toLowerCase()}"** is now blocked. Message containing it will be automatically deleted.`,
@@ -56,7 +57,7 @@ export const BlockTextCommand = {
         });
       }
     } else if (sub === 'remove') {
-      const removed = Database.removeBlockedText(phrase);
+      const removed = Database.removeBlockedText(guildId, phrase);
       if (removed) {
         await interaction.reply({
           content: `✅ **Automod Updated**: Phrase **"${phrase.toLowerCase()}"** has been unblocked.`,
@@ -100,9 +101,10 @@ export const BlockLinkCommand = {
 
     const sub = interaction.options.getSubcommand();
     const domain = interaction.options.getString('domain', true);
+    const guildId = interaction.guildId!;
 
     if (sub === 'add') {
-      const added = Database.addBlockedLink(domain);
+      const added = Database.addBlockedLink(guildId, domain);
       if (added) {
         await interaction.reply({
           content: `✅ **Automod Updated**: Link domain **"${domain.toLowerCase()}"** is now blocked. Message containing this link will be deleted.`,
@@ -114,7 +116,7 @@ export const BlockLinkCommand = {
         });
       }
     } else if (sub === 'remove') {
-      const removed = Database.removeBlockedLink(domain);
+      const removed = Database.removeBlockedLink(guildId, domain);
       if (removed) {
         await interaction.reply({
           content: `✅ **Automod Updated**: Link domain **"${domain.toLowerCase()}"** has been unblocked.`,
@@ -158,9 +160,10 @@ export const SpamCommand = {
 
     const sub = interaction.options.getSubcommand();
     const target = interaction.options.getUser('target', true);
+    const guildId = interaction.guildId!;
 
     if (sub === 'allow') {
-      const added = Database.addSpamExemptUser(target.id);
+      const added = Database.addSpamExemptUser(guildId, target.id);
       if (added) {
         await interaction.reply({
           content: `✅ **Anti-Spam Exemption Granted**: **${target.tag}** will now bypass message frequency and duplicate content filters.`,
@@ -172,7 +175,7 @@ export const SpamCommand = {
         });
       }
     } else if (sub === 'revoke') {
-      const removed = Database.removeSpamExemptUser(target.id);
+      const removed = Database.removeSpamExemptUser(guildId, target.id);
       if (removed) {
         await interaction.reply({
           content: `✅ **Anti-Spam Exemption Revoked**: **${target.tag}** is no longer exempt from message filters.`,
